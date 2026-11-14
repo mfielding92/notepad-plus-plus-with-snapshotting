@@ -142,7 +142,8 @@ public:
 	SavingStatus saveBuffer(BufferID id, const wchar_t* filename, bool isCopy = false);
 	bool backupCurrentBuffer();
 	bool consumeBackupFailureNotice(std::wstring& failedPath, DWORD& lastError);
-	std::string getBackupContent(BufferID id);
+	std::string getBackupContent(const Buffer* buffer, const char* text, size_t length) const;
+	void onBackupFailure(const std::wstring& failedPath, DWORD lastError);
 	bool deleteBufferBackup(BufferID id);
 	bool deleteFile(BufferID id);
 	bool moveFile(BufferID id, const wchar_t * newFilename);
@@ -187,9 +188,8 @@ private:
 	bool copyFileContentToScintilla(ScintillaEditView* ingestView, FILE* fp, char* data, int64_t fileSize, Utf8_16_Read* unicodeConvertor, LoadedFileFormat& fileFormat, EolType& format, int& sciStatus, const DocumentFillPolicy& policy);
 	void resolveLoadedEncoding(int& encodingOut, UniMode& unicodeModeOut) const;
 	LangType detectLanguageFromTextBeginning(const unsigned char *data, size_t dataLen);
-	void onBackupFailure(const std::wstring& failedPath, DWORD lastError);
 
-	// periodic backup failures are notified once per failure streak
+	// per-file backup failures are notified once per failure streak
 	SessionSnapshot::Scheduler _backupFailureLatch;
 	std::wstring _backupFailedPath;
 	DWORD _backupFailedError = ERROR_SUCCESS;

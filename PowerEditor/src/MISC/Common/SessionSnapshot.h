@@ -44,7 +44,7 @@ namespace SessionSnapshot
 
 	enum class WriteOutcome { Ok, OkFallback, Failed };
 
-	// UI thread only: decides when a snapshot is due, and when the user has to be told about a failure (once per failure streak)
+	// UI thread only: decides when a snapshot is due, and when the user has to be told about a failure (each time it gets worse, until an Ok)
 	class Scheduler
 	{
 	public:
@@ -56,9 +56,11 @@ namespace SessionSnapshot
 		void onPruned(unsigned long long nowTickMs);
 
 	private:
+		enum class Level { Ok, OkFallback, Failed }; // in order of seriousness
+
 		bool _isPending = false;
 		bool _isNoticeOwed = false;
-		bool _isInFailureStreak = false;
+		Level _level = Level::Ok;
 		bool _hasPruned = false;
 		unsigned long long _lastPruneTick = 0;
 	};

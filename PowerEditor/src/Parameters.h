@@ -151,7 +151,7 @@ struct sessionFileInfo : public Position
 	// session snapshot only: the bytes of the per-file backup of this document
 	std::string _snapshotContent;
 	bool _hasSnapshotContent = false;
-	bool _isSnapshotContentOmitted = false; // dirty large file
+	std::string _snapshotContentOmitted; // "largeFile" or "clone" (the content is in the first entry of the buffer)
 };
 
 struct FileBrowserRootsInfo
@@ -175,6 +175,7 @@ struct Session
 	std::vector<sessionFileInfo> _subViewFiles;
 	std::vector<FileBrowserRootsInfo> _fileBrowserRoots;
 	bool _isSnapshot = false; // loaded from a session snapshot file
+	std::wstring _snapshotTime; // "YYYY-MM-DD HH:MM:SS" of the snapshot
 };
 
 
@@ -1684,6 +1685,8 @@ public:
 	bool doPrintAndExit() const { return _doPrintAndExit; }
 
 	bool loadSession(Session& session, const wchar_t* sessionFileName, const bool bSuppressErrorMsg = false);
+	bool isSessionSnapshotFile(const wchar_t* sessionFileName) const;
+	bool consumeSessionSaveFailureNotice(std::wstring& failedPath, DWORD& lastError);
 
 	void setLoadedSessionFilePath(const std::wstring & loadedSessionFilePath) {
 		_loadedSessionFullFilePath = loadedSessionFilePath;
@@ -1963,6 +1966,11 @@ private:
 
 	bool _isEndSessionStarted = false;
 	bool _isEndSessionCritical = false;
+
+	// session file save failures are notified once per failure streak
+	SessionSnapshot::Scheduler _sessionSaveFailureLatch;
+	std::wstring _sessionSaveFailedPath;
+	DWORD _sessionSaveFailedError = ERROR_SUCCESS;
 
 	bool _isPlaceHolderEnabled = false;
 	bool _theWarningHasBeenGiven = false;

@@ -991,26 +991,35 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 		{
 			const NppGUI& nppGui = nppParam.getNppGUI();
 
-			if (nppGui._rememberLastSession && !nppGui._isCmdlineNosessionActivated)
+			if (nppGui._rememberLastSession && !nppGui._isCmdlineNosessionActivated && !_isSavingCurrentSession)
 			{
+				_isSavingCurrentSession = true;
 				Session currentSession;
 				getCurrentOpenedFiles(currentSession, true);
 				nppParam.writeSession(currentSession);
+				_isSavingCurrentSession = false;
 			}
 			return TRUE;
 		}
 
 		case NPPM_INTERNAL_SAVEBACKUP:
 		{
-			if (nppParam.getNppGUI().isSnapshotMode())
+			if (nppParam.getNppGUI().isSnapshotMode() && !_isQuitting && !_isInSaveBackup)
 			{
+				_isInSaveBackup = true;
 				MainFileManager.backupCurrentBuffer();
-				notifyBackupFailure();
 
 				if (_sessionSnapshotScheduler.shouldWrite())
 					saveSessionSnapshot();
+				_isInSaveBackup = false;
 			}
 
+			return TRUE;
+		}
+
+		case NPPM_INTERNAL_SHOWBACKUPNOTICE:
+		{
+			showBackupNotices();
 			return TRUE;
 		}
 
@@ -2959,12 +2968,14 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 				{
 					::LockWindowUpdate(hwnd);
 					MainFileManager.backupCurrentBuffer();
-					notifyBackupFailure();
 
 					// the last edits since the previous snapshot
 					if (_sessionSnapshotScheduler.shouldWrite())
 						saveSessionSnapshot();
 				}
+
+				// from now on the periodic backup does nothing, unless the quit is cancelled
+				_isQuitting = true;
 
 				Session currentSession;
 				if (!((nppgui._multiInstSetting == monoInst) && !nppgui._rememberLastSession))
@@ -2992,6 +3003,7 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 					// cancelled by user
 					scnN.nmhdr.code = NPPN_CANCELSHUTDOWN;
 					_pluginsManager.notify(&scnN);
+					_isQuitting = false;
 					if (isSnapshotMode)
 						::LockWindowUpdate(NULL);
 
@@ -4108,6 +4120,9 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 
 		case NPPM_INTERNAL_DOCMODIFIEDBYREPLACEALL:
 		{
+			// the modified status of the buffer has been set by Replace All (no SCN_MODIFIED during the operation)
+			_sessionSnapshotScheduler.markDirty();
+
 			Buffer* currentBuf = _pEditView->getCurrentBuffer();
 			if (wParam == reinterpret_cast<WPARAM>(currentBuf))
 			{

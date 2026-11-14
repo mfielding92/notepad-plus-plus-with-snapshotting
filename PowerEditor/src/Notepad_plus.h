@@ -239,7 +239,8 @@ public:
 
 	void getCurrentOpenedFiles(Session& session, bool includeUntitledDoc = false, bool includeSnapshotContent = false);
 	void saveSessionSnapshot();
-	bool restoreSessionSnapshotContent(Session& session);
+	bool prepareSessionSnapshotRestore(Session& session, std::wstring& restoreReport);
+	void showSessionSnapshotRestoreReport(const std::wstring& restoreReport);
 
 	bool fileLoadSession(const wchar_t* fn = nullptr);
 	const wchar_t* fileSaveSession(size_t nbFile, wchar_t** fileNames, const wchar_t* sessionFile2save, bool includeFileBrowser = false);
@@ -284,7 +285,9 @@ public:
 	}
 
 	void launchDocumentBackupTask();
-	void notifyBackupFailure();
+	void postBackupNotice();
+	void showBackupNotices();
+	void renameUntitledBackupFile(Buffer* buf, const std::wstring& newTabName);
 	int getQuoteIndexFrom(const wchar_t* quoter) const;
 	void showQuoteFromIndex(int index) const;
 	void showQuote(const QuoteParams* quote) const;
@@ -434,7 +437,14 @@ private:
 
 	bool _isNppSessionSavedAtExit = false; // guard flag, it prevents emptying of the Notepad++ session.xml in case of multiple WM_ENDSESSION or WM_CLOSE messages
 	bool _isBackupTaskLaunched = false; // only one backup thread for the whole process
+	bool _isQuitting = false; // set once the exit snapshot is written, the periodic backup does nothing from then on
+	bool _isInSaveBackup = false; // re-entrancy guards
+	bool _isWritingSessionSnapshot = false;
+	bool _isSavingCurrentSession = false;
+	bool _isShowingBackupNotice = false;
 	SessionSnapshot::Scheduler _sessionSnapshotScheduler;
+	std::wstring _sessionSnapshotNoticeInfo; // what the next session snapshot notice says
+	bool _isSessionSnapshotNoticeFallback = false;
 
 	ScintillaCtrls _scintillaCtrls4Plugins;
 

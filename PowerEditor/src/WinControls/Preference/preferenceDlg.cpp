@@ -5675,7 +5675,7 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 
 			if (dlgCtrlID == IDD_BACKUPDIR_STATIC)
 			{
-				bool isTextEnabled = !isCheckedOrNot(IDC_RADIO_BKNONE) && isCheckedOrNot(IDC_BACKUPDIR_CHECK);
+				bool isTextEnabled = (!isCheckedOrNot(IDC_RADIO_BKNONE) || isCheckedOrNot(IDC_BACKUPDIR_RESTORESESSION_CHECK)) && isCheckedOrNot(IDC_BACKUPDIR_CHECK);
 				return NppDarkMode::onCtlColorDlgStaticText(hdcStatic, isTextEnabled);
 			}
 
@@ -5797,6 +5797,7 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 						::SendMessage(_hSelf, WM_COMMAND, IDC_BACKUPDIR_RESTORESESSION_CHECK, 0);
 					}
 					updateBackupSessionGUI();
+					updateSnapshotPath();
 					return TRUE;
 				}
 
@@ -5810,6 +5811,8 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 				{
 					nppGUI._isSnapshotMode = BST_CHECKED == ::SendDlgItemMessage(_hSelf, IDC_BACKUPDIR_RESTORESESSION_CHECK, BM_GETCHECK, 0, 0);
 					updateBackupSessionGUI();
+					updateBackupOnSaveGUI(); // the custom directory is also the snapshot folder
+					updateSnapshotPath();
 
 					if (nppGUI._isSnapshotMode)
 					{
@@ -5887,17 +5890,22 @@ void BackupSubDlg::updateSnapshotPath()
 {
 	NppParameters& nppParam = NppParameters::getInstance();
 	const NppGUI& nppGUI = nppParam.getNppGUI();
-	wstring snapshotPath = SessionSnapshot::resolveDir(nppGUI._useDir, nppGUI._backupDir, nppParam.getUserPath());
+	wstring snapshotPath;
+	if (nppGUI._isSnapshotMode && nppGUI._rememberLastSession && !nppGUI.isSnapshotMode())
+		snapshotPath = nppParam.getNativeLangSpeaker()->getLocalizedStrFromID("backup-snapshot-off-nosession", L"(off in this window: started with -nosession)");
+	else
+		snapshotPath = SessionSnapshot::resolveDir(nppGUI._useDir, nppGUI._backupDir, nppParam.getUserPath());
 	::SetDlgItemText(_hSelf, IDD_BACKUPDIR_SNAPSHOT_PATH_EDIT, snapshotPath.c_str());
 }
 
 void BackupSubDlg::updateBackupOnSaveGUI()
 {
 	bool noBackup = BST_CHECKED == ::SendDlgItemMessage(_hSelf, IDC_RADIO_BKNONE, BM_GETCHECK, 0, 0);
+	bool isSnapshot = isCheckedOrNot(IDC_BACKUPDIR_RESTORESESSION_CHECK); // the custom directory is also the session snapshot folder
 	bool isEnableGlobableCheck = false;
 	bool isEnableLocalCheck = false;
 
-	if (!noBackup)
+	if (!noBackup || isSnapshot)
 	{
 		isEnableGlobableCheck = true;
 		isEnableLocalCheck = BST_CHECKED == ::SendDlgItemMessage(_hSelf, IDC_BACKUPDIR_CHECK, BM_GETCHECK, 0, 0);
@@ -5911,7 +5919,7 @@ void BackupSubDlg::updateBackupOnSaveGUI()
 
 	if (NppDarkMode::isEnabled())
 	{
-		::EnableWindow(::GetDlgItem(_hSelf, IDC_BACKUPDIR_USERCUSTOMDIR_GRPSTATIC), !noBackup);
+		::EnableWindow(::GetDlgItem(_hSelf, IDC_BACKUPDIR_USERCUSTOMDIR_GRPSTATIC), isEnableGlobableCheck);
 		redrawDlgItem(IDC_BACKUPDIR_USERCUSTOMDIR_GRPSTATIC);
 	}
 }

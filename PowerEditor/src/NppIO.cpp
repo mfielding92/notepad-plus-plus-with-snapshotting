@@ -2188,19 +2188,7 @@ bool Notepad_plus::fileRename(BufferID bufferID)
 				bool isSnapshotMode = NppParameters::getInstance().getNppGUI().isSnapshotMode();
 				if (isSnapshotMode)
 				{
-					wstring oldBackUpFileName = buf->getBackupFileName();
-					if (oldBackUpFileName.empty())
-						return success;
-
-					wstring newBackUpFileName = oldBackUpFileName;
-					newBackUpFileName.replace(newBackUpFileName.rfind(oldFileNamePath), oldFileNamePath.length(), tabNewNameStr);
-
-					if (doesFileExist(newBackUpFileName.c_str()))
-						::ReplaceFile(newBackUpFileName.c_str(), oldBackUpFileName.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS, 0, 0);
-					else
-						::MoveFileEx(oldBackUpFileName.c_str(), newBackUpFileName.c_str(), MOVEFILE_REPLACE_EXISTING);
-
-					buf->setBackupFileName(newBackUpFileName);
+					renameUntitledBackupFile(buf, tabNewNameStr);
 				}
 			}
 		}
@@ -2235,9 +2223,6 @@ bool Notepad_plus::useFirstLineAsTabName(BufferID bufferID)
 		scnNotif.nmhdr.idFrom = (uptr_t)buffer->getID();
 		_pluginsManager.notify(&scnNotif);
 
-		// backup old file path
-		wstring oldFileNamePath = buffer->getFullPathName();
-
 		// set tab name
 		buffer->setFileName(content1stLineTabName.c_str());
 
@@ -2246,19 +2231,10 @@ bool Notepad_plus::useFirstLineAsTabName(BufferID bufferID)
 		_pluginsManager.notify(&scnNotif);
 
 		// for the backup system
-		wstring oldBackUpFileName = buffer->getBackupFileName();
 		bool isSnapshotMode = NppParameters::getInstance().getNppGUI().isSnapshotMode();
-		if (isSnapshotMode && !oldBackUpFileName.empty())
+		if (isSnapshotMode)
 		{
-			wstring newBackUpFileName = oldBackUpFileName;
-			newBackUpFileName.replace(newBackUpFileName.rfind(oldFileNamePath), oldFileNamePath.length(), content1stLineTabName);
-
-			if (doesFileExist(newBackUpFileName.c_str()))
-				::ReplaceFile(newBackUpFileName.c_str(), oldBackUpFileName.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS, 0, 0);
-			else
-				::MoveFileEx(oldBackUpFileName.c_str(), newBackUpFileName.c_str(), MOVEFILE_REPLACE_EXISTING);
-
-			buffer->setBackupFileName(newBackUpFileName);
+			renameUntitledBackupFile(buffer, content1stLineTabName);
 		}
 
 		return true;
@@ -2312,7 +2288,6 @@ bool Notepad_plus::fileRenameUntitledPluginAPI(BufferID id, const wchar_t* tabNe
 	scnN.nmhdr.idFrom = (uptr_t)bufferID;
 	_pluginsManager.notify(&scnN);
 
-	wstring oldName = buf->getFullPathName();
 	buf->setFileName(tabNewNameStr.c_str());
 
 	scnN.nmhdr.code = NPPN_FILERENAMED;
@@ -2323,21 +2298,7 @@ bool Notepad_plus::fileRenameUntitledPluginAPI(BufferID id, const wchar_t* tabNe
 	bool isSnapshotMode = NppParameters::getInstance().getNppGUI().isSnapshotMode();
 	if (isSnapshotMode)
 	{
-		wstring oldBackUpFileName = buf->getBackupFileName();
-		if (oldBackUpFileName.empty())
-		{
-			return true;
-		}
-
-		wstring newBackUpFileName = oldBackUpFileName;
-		newBackUpFileName.replace(newBackUpFileName.rfind(oldName), oldName.length(), tabNewNameStr);
-
-		if (doesFileExist(newBackUpFileName.c_str()))
-			::ReplaceFile(newBackUpFileName.c_str(), oldBackUpFileName.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS, 0, 0);
-		else
-			::MoveFileEx(oldBackUpFileName.c_str(), newBackUpFileName.c_str(), MOVEFILE_REPLACE_EXISTING);
-
-		buf->setBackupFileName(newBackUpFileName);
+		renameUntitledBackupFile(buf, tabNewNameStr);
 	}
 
 	return true;
@@ -2888,7 +2849,8 @@ bool Notepad_plus::fileLoadSession(const wchar_t *fn)
 			Buffer * buf2 = MainFileManager.getBufferByID(_subDocTab.getBufferByIndex(0));
 			isEmptyNpp = (!buf1->isDirty() && buf1->isUntitled() && !buf2->isDirty() && buf2->isUntitled());
 		}
-		if (!isEmptyNpp && (nppGUI._multiInstSetting == multiInstOnSession || nppGUI._multiInstSetting == multiInst))
+		// a session snapshot is always restored into this instance
+		if (!isEmptyNpp && (nppGUI._multiInstSetting == multiInstOnSession || nppGUI._multiInstSetting == multiInst) && !nppParam.isSessionSnapshotFile(sessionFileName.c_str()))
 		{
 			wchar_t nppFullPath[MAX_PATH]{};
 			::GetModuleFileName(NULL, nppFullPath, MAX_PATH);
@@ -2906,8 +2868,10 @@ bool Notepad_plus::fileLoadSession(const wchar_t *fn)
 
 			if (nppParam.loadSession(session2Load, sessionFileName.c_str()))
 			{
-				const bool isSnapshotMode = restoreSessionSnapshotContent(session2Load);
+				wstring restoreReport;
+				const bool isSnapshotMode = prepareSessionSnapshotRestore(session2Load, restoreReport);
 				result = loadSession(session2Load, isSnapshotMode, sessionFileName.c_str());
+				showSessionSnapshotRestoreReport(restoreReport);
 
 				if (isEmptyNpp && nppGUI._multiInstSetting == multiInstOnSession && !session2Load._isSnapshot) // a session snapshot is never overwritten
 					nppParam.setLoadedSessionFilePath(sessionFileName);

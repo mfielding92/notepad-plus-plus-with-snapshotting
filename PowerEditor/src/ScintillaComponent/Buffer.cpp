@@ -1296,123 +1296,96 @@ bool FileManager::backupCurrentBuffer()
 	if (buffer->isLargeFile())
 		return false;
 
-	std::lock_guard<std::mutex> lock(backup_mutex);
-
 	bool result = false;
 	bool hasModifForSession = false;
 
-	if (buffer->isDirty())
 	{
-		if (buffer->isModified()) // buffer dirty and modified, write the backup file
+		std::lock_guard<std::mutex> lock(backup_mutex); // file operations only: it is released before the session is saved
+
+		if (buffer->isDirty())
 		{
-			UniMode mode = buffer->getUnicodeMode();
-			if (mode == uniUTF8_NoBOM)
-				mode = uni8Bit;	//set the mode to ANSI to prevent converter from adding BOM and performing conversions, Scintilla's data can be copied directly
-
-			Utf8_16_Write UnicodeConvertor;
-			UnicodeConvertor.setEncoding(mode);
-			int encoding = buffer->getEncoding();
-
-			wstring backupFilePath = buffer->getBackupFileName();
-			if (backupFilePath.empty())
+			if (buffer->isModified()) // buffer dirty and modified, write the backup file
 			{
-				// Create file
-				backupFilePath = NppParameters::getInstance().getUserPath();
-				backupFilePath += L"\\backup\\";
-
-				// if "backup" folder doesn't exist, create it.
-				if (!doesDirectoryExist(backupFilePath.c_str()))
+				wstring backupFilePath = buffer->getBackupFileName();
+				const bool isNewBackupFile = backupFilePath.empty();
+				if (isNewBackupFile)
 				{
-					if (!::CreateDirectory(backupFilePath.c_str(), NULL) && !doesDirectoryExist(backupFilePath.c_str()))
+					// Create file
+					backupFilePath = NppParameters::getInstance().getUserPath();
+					backupFilePath += L"\\backup\\";
+
+					// if "backup" folder doesn't exist, create it.
+					if (!doesDirectoryExist(backupFilePath.c_str()))
 					{
-						onBackupFailure(backupFilePath, ::GetLastError());
+						if (!::CreateDirectory(backupFilePath.c_str(), NULL) && !doesDirectoryExist(backupFilePath.c_str()))
+						{
+							onBackupFailure(backupFilePath, ::GetLastError());
+							return false;
+						}
+					}
+
+					backupFilePath += buffer->getFileName();
+
+					const int temBufLen = 32;
+					wchar_t tmpbuf[temBufLen];
+					time_t ltime = time(0);
+					const struct tm* today = localtime(&ltime);
+					if (!today)
 						return false;
-					}
+
+					wcsftime(tmpbuf, temBufLen, L"%Y-%m-%d_%H%M%S", today);
+
+					backupFilePath += L"@";
+					backupFilePath += tmpbuf;
 				}
 
-				backupFilePath += buffer->getFileName();
-
-				const int temBufLen = 32;
-				wchar_t tmpbuf[temBufLen];
-				time_t ltime = time(0);
-				const struct tm* today = localtime(&ltime);
-				if (!today)
+				wchar_t fullpath[MAX_PATH]{};
+				const DWORD fullpathLen = ::GetFullPathName(backupFilePath.c_str(), MAX_PATH, fullpath, NULL);
+				if (fullpathLen == 0 || fullpathLen >= MAX_PATH)
+				{
+					onBackupFailure(backupFilePath, fullpathLen == 0 ? ::GetLastError() : ERROR_FILENAME_EXCED_RANGE);
 					return false;
-
-				wcsftime(tmpbuf, temBufLen, L"%Y-%m-%d_%H%M%S", today);
-
-				backupFilePath += L"@";
-				backupFilePath += tmpbuf;
-
-				// Set created file name in buffer
-				buffer->setBackupFileName(backupFilePath);
-
-				// Session changes, save it
-				hasModifForSession = true;
-			}
-
-			wchar_t fullpath[MAX_PATH]{};
-			::GetFullPathName(backupFilePath.c_str(), MAX_PATH, fullpath, NULL);
-			if (wcschr(fullpath, '~'))
-			{
-				::GetLongPathName(fullpath, fullpath, MAX_PATH);
-			}
-
-			// Make sure the backup file is not read only
-			removeReadOnlyFlagFromFileAttributes(fullpath);
-
-			std::wstring fullpathTemp = fullpath;
-			fullpathTemp += L".tmp";
-			if (UnicodeConvertor.openFile(buffer->isUntitled() ? fullpathTemp.c_str() : fullpath)) // Use temp only for "new #" due to they don't have the original physical existance on the hard drive
-			{
-				size_t lengthDoc = _pNotepadPlus->_pEditView->getCurrentDocLen();
-				char* buf = (char*)_pNotepadPlus->_pEditView->execute(SCI_GETCHARACTERPOINTER);	//to get characters directly from Scintilla buffer
-				bool isWrittenSuccessful = false;
-
-				if (encoding == -1) //no special encoding; can be handled directly by Utf8_16_Write
-				{
-					isWrittenSuccessful = UnicodeConvertor.writeFile(buf, lengthDoc);
-					if (lengthDoc == 0)
-						isWrittenSuccessful = true;
 				}
-				else
-				{
-					WcharMbcsConvertor& wmc = WcharMbcsConvertor::getInstance();
-					size_t grabSize = 0;
-					for (size_t i = 0; i < lengthDoc; i += grabSize)
-					{
-						grabSize = lengthDoc - i;
-						if (grabSize > blockSize)
-							grabSize = blockSize;
 
-						int newDataLen = 0;
-						int incompleteMultibyteChar = 0;
-						const char *newData = wmc.encode(SC_CP_UTF8, encoding, buf+i, static_cast<int>(grabSize), &newDataLen, &incompleteMultibyteChar);
-						grabSize -= incompleteMultibyteChar;
-						isWrittenSuccessful = UnicodeConvertor.writeFile(newData, newDataLen);
-						if (!isWrittenSuccessful)
-							break;
+				if (wcschr(fullpath, '~'))
+				{
+					::GetLongPathName(fullpath, fullpath, MAX_PATH);
+				}
+
+				// Make sure the backup file is not read only
+				removeReadOnlyFlagFromFileAttributes(fullpath);
+
+				// the creation time of the backup file is the creation time of an untitled tab: keep it
+				WIN32_FILE_ATTRIBUTE_DATA previousAttributes{};
+				const bool hasPreviousFile = ::GetFileAttributesExW(fullpath, GetFileExInfoStandard, &previousAttributes) != FALSE;
+
+				// written into "<backup>.tmp" first, then moved onto the backup file: the previous backup stays intact until the new one is complete
+				size_t lengthDoc = _pNotepadPlus->_pEditView->getCurrentDocLen();
+				const char* buf = reinterpret_cast<const char*>(_pNotepadPlus->_pEditView->execute(SCI_GETCHARACTERPOINTER));	//to get characters directly from Scintilla buffer
+				const std::string content = getBackupContent(buffer, buf, lengthDoc);
+
+				DWORD lastError = ERROR_SUCCESS;
+				if (SessionSnapshot::writeFileAtomic(fullpath, content.c_str(), content.length(), &lastError))
+				{
+					if (hasPreviousFile)
+					{
+						HANDLE hFile = ::CreateFileW(fullpath, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+						if (hFile != INVALID_HANDLE_VALUE)
+						{
+							::SetFileTime(hFile, &previousAttributes.ftCreationTime, nullptr, nullptr);
+							::CloseHandle(hFile);
+						}
 					}
 
-					if (lengthDoc == 0)
-						isWrittenSuccessful = true;
-				}
-				DWORD lastError = UnicodeConvertor.getLastFileErrorState();
-				UnicodeConvertor.closeFile();
+					if (isNewBackupFile)
+					{
+						// Set created file name in buffer
+						buffer->setBackupFileName(backupFilePath);
 
-				if (isWrittenSuccessful && buffer->isUntitled()) // "new #" file is saved successfully, then we replace its only physical existence by its temp
-				{
-					if (doesFileExist(fullpath))
-						isWrittenSuccessful = ::ReplaceFile(fullpath, fullpathTemp.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS, 0, 0) != FALSE;
-					else
-						isWrittenSuccessful = ::MoveFileEx(fullpathTemp.c_str(), fullpath, MOVEFILE_REPLACE_EXISTING) != FALSE;
+						// Session changes, save it
+						hasModifForSession = true;
+					}
 
-					if (!isWrittenSuccessful)
-						lastError = ::GetLastError();
-				}
-
-				if (isWrittenSuccessful) // backup file has been saved
-				{
 					buffer->setTabCreatedTimeStringFromBakFile();
 
 					buffer->setModifiedStatus(false);
@@ -1423,36 +1396,29 @@ bool FileManager::backupCurrentBuffer()
 				}
 				else // keep the modified status, so it will be retried at the next backup
 				{
-					if (buffer->isUntitled())
-						::DeleteFile(fullpathTemp.c_str());
-
 					onBackupFailure(fullpath, lastError);
 				}
 			}
-			else
+			else // buffer dirty but unmodified
 			{
-				onBackupFailure(buffer->isUntitled() ? fullpathTemp : fullpath, UnicodeConvertor.getLastFileErrorState());
+				result = true;
 			}
 		}
-		else // buffer dirty but unmodified
+		else // buffer not dirty, sync: delete the backup file
 		{
-			result = true;
-		}
-	}
-	else // buffer not dirty, sync: delete the backup file
-	{
-		wstring backupFilePath = buffer->getBackupFileName();
-		if (!backupFilePath.empty())
-		{
-			// delete backup file
-			wstring file2Delete = buffer->getBackupFileName();
-			buffer->setBackupFileName(wstring());
-			result = (::DeleteFile(file2Delete.c_str()) != 0);
+			wstring backupFilePath = buffer->getBackupFileName();
+			if (!backupFilePath.empty())
+			{
+				// delete backup file
+				wstring file2Delete = buffer->getBackupFileName();
+				buffer->setBackupFileName(wstring());
+				result = (::DeleteFile(file2Delete.c_str()) != 0);
 
-			// Session changes, save it
-			hasModifForSession = true;
+				// Session changes, save it
+				hasModifForSession = true;
+			}
+			result = true; // no backup file to delete
 		}
-		result = true; // no backup file to delete
 	}
 
 	if (result && hasModifForSession)
@@ -1467,6 +1433,7 @@ void FileManager::onBackupFailure(const std::wstring& failedPath, DWORD lastErro
 	_backupFailedPath = failedPath;
 	_backupFailedError = lastError;
 	_backupFailureLatch.onWriteResult(SessionSnapshot::WriteOutcome::Failed);
+	_pNotepadPlus->postBackupNotice();
 }
 
 bool FileManager::consumeBackupFailureNotice(std::wstring& failedPath, DWORD& lastError)
@@ -1551,22 +1518,14 @@ static std::string encodeForUacSave(const char* buf, size_t len, UniMode mode, i
 	return out;
 }
 
-// The bytes the backup file of this buffer contains (see backupCurrentBuffer), read without touching any view
-std::string FileManager::getBackupContent(BufferID id)
+// The bytes of the backup file of a buffer (also the content of a session snapshot), from the Scintilla text of the buffer
+std::string FileManager::getBackupContent(const Buffer* buffer, const char* text, size_t length) const
 {
-	Buffer* buffer = getBufferByID(id);
-
 	UniMode mode = buffer->getUnicodeMode();
 	if (mode == uniUTF8_NoBOM)
-		mode = uni8Bit;
+		mode = uni8Bit;	//set the mode to ANSI to prevent converter from adding BOM and performing conversions, Scintilla's data can be copied directly
 
-	_pscratchTilla->execute(SCI_SETDOCPOINTER, 0, buffer->_doc);
-	size_t lengthDoc = _pscratchTilla->getCurrentDocLen();
-	const char* buf = reinterpret_cast<const char*>(_pscratchTilla->execute(SCI_GETCHARACTERPOINTER));
-	std::string content = encodeForUacSave(buf, lengthDoc, mode, buffer->getEncoding());
-	_pscratchTilla->execute(SCI_SETDOCPOINTER, 0, _scratchDocDefault);
-
-	return content;
+	return encodeForUacSave(text, length, mode, buffer->getEncoding());
 }
 
 static std::wstring CreateGuidString()

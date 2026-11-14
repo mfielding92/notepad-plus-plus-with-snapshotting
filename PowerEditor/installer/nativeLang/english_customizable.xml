@@ -1582,9 +1582,12 @@ Notepad++ will try again at the next backup."/><!-- HowToReproduce: enable sessi
 			<SessionSnapshotFallback title="Session snapshot saved into the default backup folder" message="The session snapshot could not be written into the configured backup folder, so it has been saved into the default backup folder (last path below):
 
 $STR_REPLACE$"/><!-- HowToReproduce: check "Custom Backup Directory" with a folder which cannot be written, then modify a document and wait for the backup interval. -->
-			<SessionSnapshotRestoreFailed title="Session snapshot restore" message="The content of the following documents could not be restored from the session snapshot:
+			<SessionSnapshotRestoreReport title="Session snapshot restore" message="Some documents of the session snapshot were not restored as they were:
 
-$STR_REPLACE$"/><!-- HowToReproduce: this message prevents from system failure. It's hard to reproduce. -->
+$STR_REPLACE$"/><!-- HowToReproduce: open a file, modify it, wait for a session snapshot, then load that snapshot with File > Load Session... while the file is still open. -->
+			<SessionSaveFailed title="Error of saving session XML file" message="The session file could not be saved, its previous version is kept:
+
+$STR_REPLACE$"/><!-- HowToReproduce: make session.xml read-only for everyone (e.g. deny write on its folder), then switch tabs. -->
 			<LoadStylersFailed title="Load stylers.xml failed" message="Load &quot;$STR_REPLACE$&quot; failed!"/>
 			<LoadLangsFailed title="Configurator" message="Load langs.xml failed!
 Do you want to recover your langs.xml?"/><!-- HowToReproduce: Close Notepad++. Use another editor to remove all content of "langs.xml" (0 length) then save it. Open Notepad++. -->
@@ -1786,6 +1789,9 @@ Proceed only if you understand the risks."/>
 			<word-chars-list-tab-warning value="$INT_REPLACE$ TAB(s)"/>
 			<word-chars-list-warning-end value="  in your character list."/><!-- HowToReproduce: In "Delimiter" section of Preferences dialog, check "Add your character as part of word\r(don't choose it unless you know what you're doing)", then type a white-space in the text field. -->
 			<backup-select-folder value="Select a folder as backup directory"/><!-- HowToReproduce: Settings > Preferences > Backup > [...] -->
+			<backup-snapshot-off-nosession value="(off in this window: started with -nosession)"/><!-- HowToReproduce: launch Notepad++ with -multiInst -nosession, then Settings > Preferences > Backup -->
+			<session-snapshot-restore-separate-tab value="opened as a separate tab"/><!-- HowToReproduce: see SessionSnapshotRestoreReport -->
+			<session-snapshot-restore-failed value="could not be restored"/><!-- HowToReproduce: see SessionSnapshotRestoreReport -->
 			<cloud-invalid-warning value="Invalid path."/>
 			<cloud-restart-warning value="Please restart Notepad++ to take effect."/>
 			<cloud-select-folder value="Select a folder from/to where Notepad++ reads/writes its settings"/><!-- HowToReproduce: In "Cloud" section of Preferences dialog, check "Set your cloud location path here: ", then click the button "...". This message is displayed in the "Browse For Folder" dialog. -->

@@ -277,6 +277,7 @@ namespace SessionSnapshot
 		{
 			std::wstring _name;
 			unsigned long long _ticks = 0;
+			unsigned long long _lastWriteUtcTicks = 0;
 			bool _isTmp = false;
 		};
 		std::vector<Candidate> candidates;
@@ -303,6 +304,7 @@ namespace SessionSnapshot
 			Candidate candidate;
 			if (!toTicks(nameTime, candidate._ticks))
 				continue;
+			candidate._lastWriteUtcTicks = (static_cast<unsigned long long>(findData.ftLastWriteTime.dwHighDateTime) << 32) | findData.ftLastWriteTime.dwLowDateTime;
 			candidate._name = std::move(name);
 			candidate._isTmp = isTmp;
 			candidates.push_back(std::move(candidate));
@@ -318,14 +320,20 @@ namespace SessionSnapshot
 				newestIndex = i;
 		}
 
+		// a file is old only if both the time in its name and its last write time (UTC) are older than the retention
 		unsigned long long nowTicks = 0;
-		const bool canDelete = retentionHours != 0 && retentionHours <= ULLONG_MAX / FILETIME_TICKS_PER_HOUR && toTicks(nowLocal, nowTicks);
+		unsigned long long nowUtcTicks = 0;
+		SYSTEMTIME nowUtc{};
+		const bool canDelete = retentionHours != 0 && retentionHours <= ULLONG_MAX / FILETIME_TICKS_PER_HOUR && toTicks(nowLocal, nowTicks)
+			&& ::TzSpecificLocalTimeToSystemTime(nullptr, &nowLocal, &nowUtc) && toTicks(nowUtc, nowUtcTicks);
 		const unsigned long long retentionTicks = canDelete ? retentionHours * FILETIME_TICKS_PER_HOUR : 0;
 
 		for (size_t i = 0; i < candidates.size(); ++i)
 		{
 			const Candidate& candidate = candidates[i];
-			const bool isDue = canDelete && i != newestIndex && candidate._ticks < nowTicks && (nowTicks - candidate._ticks) > retentionTicks;
+			const bool isDue = canDelete && i != newestIndex
+				&& candidate._ticks < nowTicks && (nowTicks - candidate._ticks) > retentionTicks
+				&& candidate._lastWriteUtcTicks < nowUtcTicks && (nowUtcTicks - candidate._lastWriteUtcTicks) > retentionTicks;
 			if (isDue)
 			{
 				if (::DeleteFileW(joinPath(dir, candidate._name).c_str()))
@@ -442,7 +450,7 @@ namespace SessionSnapshot
 			case WriteOutcome::Ok:
 			{
 				_isPending = false;
-				_isInFailureStreak = false;
+				_level = Level::Ok;
 				_isNoticeOwed = false;
 				break;
 			}
@@ -450,22 +458,18 @@ namespace SessionSnapshot
 			case WriteOutcome::OkFallback:
 			{
 				_isPending = false;
-				if (!_isInFailureStreak)
-				{
-					_isInFailureStreak = true;
+				if (_level < Level::OkFallback)
 					_isNoticeOwed = true;
-				}
+				_level = Level::OkFallback;
 				break;
 			}
 
 			case WriteOutcome::Failed:
 			{
-				// still pending: the next tick tries again
-				if (!_isInFailureStreak)
-				{
-					_isInFailureStreak = true;
+				// pending is left unchanged: the next tick tries again
+				if (_level < Level::Failed)
 					_isNoticeOwed = true;
-				}
+				_level = Level::Failed;
 				break;
 			}
 		}
