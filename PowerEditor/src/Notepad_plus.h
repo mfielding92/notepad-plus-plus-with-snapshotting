@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <chrono>
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -240,7 +241,8 @@ public:
 	void getCurrentOpenedFiles(Session& session, bool includeUntitledDoc = false, bool includeSnapshotContent = false);
 	void saveSessionSnapshot();
 	bool prepareSessionSnapshotRestore(Session& session, std::wstring& restoreReport);
-	void showSessionSnapshotRestoreReport(const std::wstring& restoreReport);
+	void finishSessionSnapshotRestore(const std::wstring& restoreReport);
+	void markSessionSnapshotDirty() { _sessionSnapshotScheduler.markDirty(); }
 
 	bool fileLoadSession(const wchar_t* fn = nullptr);
 	const wchar_t* fileSaveSession(size_t nbFile, wchar_t** fileNames, const wchar_t* sessionFile2save, bool includeFileBrowser = false);
@@ -285,8 +287,10 @@ public:
 	}
 
 	void launchDocumentBackupTask();
-	void postBackupNotice();
+	enum class BackupNoticeKind { perFileBackup, sessionSnapshotFailed, sessionSnapshotFallback, sessionSave };
+	void queueBackupNotice(BackupNoticeKind kind, const std::wstring& info);
 	void showBackupNotices();
+	void onBackupNoticeTimer();
 	void renameUntitledBackupFile(Buffer* buf, const std::wstring& newTabName);
 	int getQuoteIndexFrom(const wchar_t* quoter) const;
 	void showQuoteFromIndex(int index) const;
@@ -438,13 +442,33 @@ private:
 	bool _isNppSessionSavedAtExit = false; // guard flag, it prevents emptying of the Notepad++ session.xml in case of multiple WM_ENDSESSION or WM_CLOSE messages
 	bool _isBackupTaskLaunched = false; // only one backup thread for the whole process
 	bool _isQuitting = false; // set once the exit snapshot is written, the periodic backup does nothing from then on
+	// re-entrancy guard: the flag is set for the lifetime of the scope, and always reset when leaving it
+	struct ScopedFlag final
+	{
+		explicit ScopedFlag(bool& flag) : _flag(flag) { _flag = true; }
+		~ScopedFlag() { _flag = false; }
+		ScopedFlag(const ScopedFlag&) = delete;
+		ScopedFlag& operator=(const ScopedFlag&) = delete;
+	private:
+		bool& _flag;
+	};
+
 	bool _isInSaveBackup = false; // re-entrancy guards
 	bool _isWritingSessionSnapshot = false;
 	bool _isSavingCurrentSession = false;
 	bool _isShowingBackupNotice = false;
 	SessionSnapshot::Scheduler _sessionSnapshotScheduler;
-	std::wstring _sessionSnapshotNoticeInfo; // what the next session snapshot notice says
-	bool _isSessionSnapshotNoticeFallback = false;
+
+	// backup failure notices, shown one at a time when the user pauses
+	struct BackupNotice
+	{
+		BackupNoticeKind _kind = BackupNoticeKind::perFileBackup;
+		std::wstring _info; // path(s) and system error text
+		ULONGLONG _queuedTick = 0;
+		bool _isRequeued = false; // closed too quickly to have been read: shown once more
+	};
+	std::deque<BackupNotice> _backupNotices;
+	static constexpr UINT_PTR BACKUPNOTICE_TIMER_ID = 0x4E42; // one-shot re-check of the user pause
 
 	ScintillaCtrls _scintillaCtrls4Plugins;
 

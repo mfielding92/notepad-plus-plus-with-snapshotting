@@ -7142,7 +7142,8 @@ std::vector<wstring> Notepad_plus::loadCommandlineParams(const wchar_t * command
 			if (nppGUI._multiInstSetting == multiInstOnSession && !session2Load._isSnapshot) // a session snapshot is never overwritten
 				nppParams.setLoadedSessionFilePath(sessionFileName);
 			loadSession(session2Load, isSnapshotMode, sessionFileName);
-			showSessionSnapshotRestoreReport(restoreReport);
+			if (isSnapshotMode)
+				finishSessionSnapshotRestore(restoreReport);
 		}
 		return std::vector<wstring>();
 	}
@@ -9019,9 +9020,12 @@ DWORD WINAPI Notepad_plus::backupDocument(void * /*param*/)
 	// The thread lives as long as Notepad++: the snapshot mode can be switched off and on again while running
 	while (!g_bNppExitFlag.load())
 	{
+		static constexpr size_t maxTimer = 24 * 60 * 60 * 1000; // one day
 		size_t timer = nppGUI._snapshotBackupTiming;
 		if (timer < 1000)
 			timer = 1000;
+		else if (timer > maxTimer)
+			timer = maxTimer;
 
 		::Sleep(DWORD(timer));
 
@@ -9039,7 +9043,7 @@ void Notepad_plus::saveSessionSnapshot()
 {
 	if (_isQuitting || _isWritingSessionSnapshot)
 		return;
-	_isWritingSessionSnapshot = true;
+	const ScopedFlag writingSessionSnapshot(_isWritingSessionSnapshot);
 
 	NppParameters& nppParam = NppParameters::getInstance();
 	const NppGUI& nppGUI = nppParam.getNppGUI();
@@ -9092,85 +9096,91 @@ void Notepad_plus::saveSessionSnapshot()
 
 	_sessionSnapshotScheduler.onWriteResult(outcome);
 
-	if (outcome == SessionSnapshot::WriteOutcome::Ok)
+	// no message box from here: the notice is queued and shown later by the main window
+	if (_sessionSnapshotScheduler.consumeFailureNotice())
 	{
-		_sessionSnapshotNoticeInfo.clear();
-	}
-	else if (_sessionSnapshotNoticeInfo.empty() || outcome == SessionSnapshot::WriteOutcome::Failed)
-	{
-		// no message box from here: the notice is shown later by the main window
-		_isSessionSnapshotNoticeFallback = outcome == SessionSnapshot::WriteOutcome::OkFallback;
-		_sessionSnapshotNoticeInfo = snapshotPath;
-		_sessionSnapshotNoticeInfo += L"\n";
-		_sessionSnapshotNoticeInfo += GetLastErrorAsString(lastError);
+		const bool isFallback = outcome == SessionSnapshot::WriteOutcome::OkFallback;
+		wstring failureInfo = snapshotPath;
+		failureInfo += L"\n";
+		failureInfo += GetLastErrorAsString(lastError);
 		if (!fallbackPath.empty())
 		{
-			_sessionSnapshotNoticeInfo += L"\n";
-			_sessionSnapshotNoticeInfo += fallbackPath;
-			if (!_isSessionSnapshotNoticeFallback)
+			failureInfo += L"\n";
+			failureInfo += fallbackPath;
+			if (!isFallback)
 			{
-				_sessionSnapshotNoticeInfo += L"\n";
-				_sessionSnapshotNoticeInfo += GetLastErrorAsString(fallbackLastError);
+				failureInfo += L"\n";
+				failureInfo += GetLastErrorAsString(fallbackLastError);
 			}
 		}
-		postBackupNotice();
+		queueBackupNotice(isFallback ? BackupNoticeKind::sessionSnapshotFallback : BackupNoticeKind::sessionSnapshotFailed, failureInfo);
 	}
-
-	_isWritingSessionSnapshot = false;
 }
 
-void Notepad_plus::postBackupNotice()
+void Notepad_plus::queueBackupNotice(BackupNoticeKind kind, const wstring& info)
 {
+	BackupNotice notice;
+	notice._kind = kind;
+	notice._info = info;
+	notice._queuedTick = ::GetTickCount64();
+	_backupNotices.push_back(notice);
 	::PostMessage(_pPublicInterface->getHSelf(), NPPM_INTERNAL_SHOWBACKUPNOTICE, 0, 0);
 }
 
-// NPPM_INTERNAL_SHOWBACKUPNOTICE: the failures of the backup code are shown here, once per failure streak
+void Notepad_plus::onBackupNoticeTimer()
+{
+	::KillTimer(_pPublicInterface->getHSelf(), BACKUPNOTICE_TIMER_ID); // one-shot
+	::PostMessage(_pPublicInterface->getHSelf(), NPPM_INTERNAL_SHOWBACKUPNOTICE, 0, 0);
+}
+
+// NPPM_INTERNAL_SHOWBACKUPNOTICE: the queued backup failure notices are shown here, one box at a time, when the user pauses
 void Notepad_plus::showBackupNotices()
 {
+	static constexpr DWORD userPauseMs = 2000;
+	static constexpr UINT recheckMs = 500;
+	static constexpr ULONGLONG maxWaitMs = 30000;
+	static constexpr ULONGLONG unreadMs = 1000;
+
 	NppParameters& nppParam = NppParameters::getInstance();
+	for (const auto& info : nppParam.takeSessionSaveFailureNotices())
+		queueBackupNotice(BackupNoticeKind::sessionSave, info);
+
+	// nothing is removed from the queue while quitting: it is posted again if the quit is cancelled
 	if (nppParam.isEndSessionCritical() || _isQuitting || _isShowingBackupNotice)
 		return;
-	_isShowingBackupNotice = true;
+	const ScopedFlag showingBackupNotice(_isShowingBackupNotice);
 
-	bool isNoticeShown = true;
-	while (isNoticeShown && !nppParam.isEndSessionCritical() && !_isQuitting) // a notice can be raised while a message box is shown
+	while (!_backupNotices.empty() && !nppParam.isEndSessionCritical() && !_isQuitting)
 	{
-		isNoticeShown = false;
-
-		wstring failedPath;
-		DWORD lastError = ERROR_SUCCESS;
-		if (MainFileManager.consumeBackupFailureNotice(failedPath, lastError))
+		// do not open a box while the user is typing or clicking: a keystroke would dismiss it unread
+		LASTINPUTINFO lastInput{};
+		lastInput.cbSize = sizeof(lastInput);
+		const bool isUserActive = ::GetLastInputInfo(&lastInput) && (::GetTickCount() - lastInput.dwTime) < userPauseMs;
+		if (isUserActive && ::GetTickCount64() - _backupNotices.front()._queuedTick < maxWaitMs)
 		{
-			wstring failureInfo = failedPath;
-			failureInfo += L"\n";
-			failureInfo += GetLastErrorAsString(lastError);
-			_nativeLangSpeaker.messageBox("PeriodicBackupFailed",
-				_pPublicInterface->getHSelf(),
-				L"The backup of a modified document could not be written:\n\n$STR_REPLACE$\n\nNotepad++ will try again at the next backup.",
-				L"Backup failed",
-				MB_OK | MB_ICONWARNING,
-				0,
-				failureInfo.c_str());
-			isNoticeShown = true;
+			::SetTimer(_pPublicInterface->getHSelf(), BACKUPNOTICE_TIMER_ID, recheckMs, nullptr);
+			return;
 		}
 
-		if (_sessionSnapshotScheduler.consumeFailureNotice())
-		{
-			const wstring failureInfo = _sessionSnapshotNoticeInfo;
-			const bool isFallback = _isSessionSnapshotNoticeFallback;
-			_sessionSnapshotNoticeInfo.clear();
+		BackupNotice notice = _backupNotices.front();
+		_backupNotices.pop_front();
 
-			if (isFallback)
+		const ULONGLONG openedTick = ::GetTickCount64();
+		switch (notice._kind)
+		{
+			case BackupNoticeKind::perFileBackup:
 			{
-				_nativeLangSpeaker.messageBox("SessionSnapshotFallback",
+				_nativeLangSpeaker.messageBox("PeriodicBackupFailed",
 					_pPublicInterface->getHSelf(),
-					L"The session snapshot could not be written into the configured backup folder, so it has been saved into the default backup folder (last path below):\n\n$STR_REPLACE$",
-					L"Session snapshot saved into the default backup folder",
+					L"The backup of a modified document could not be written:\n\n$STR_REPLACE$\n\nNotepad++ will try again at the next backup.",
+					L"Backup failed",
 					MB_OK | MB_ICONWARNING,
 					0,
-					failureInfo.c_str());
+					notice._info.c_str());
+				break;
 			}
-			else
+
+			case BackupNoticeKind::sessionSnapshotFailed:
 			{
 				_nativeLangSpeaker.messageBox("SessionSnapshotFailed",
 					_pPublicInterface->getHSelf(),
@@ -9178,28 +9188,43 @@ void Notepad_plus::showBackupNotices()
 					L"Session snapshot failed",
 					MB_OK | MB_ICONWARNING,
 					0,
-					failureInfo.c_str());
+					notice._info.c_str());
+				break;
 			}
-			isNoticeShown = true;
+
+			case BackupNoticeKind::sessionSnapshotFallback:
+			{
+				_nativeLangSpeaker.messageBox("SessionSnapshotFallback",
+					_pPublicInterface->getHSelf(),
+					L"The session snapshot could not be written into the configured backup folder, so it has been saved into the default backup folder (last path below):\n\n$STR_REPLACE$",
+					L"Session snapshot saved into the default backup folder",
+					MB_OK | MB_ICONWARNING,
+					0,
+					notice._info.c_str());
+				break;
+			}
+
+			case BackupNoticeKind::sessionSave:
+			{
+				_nativeLangSpeaker.messageBox("SessionSaveFailed",
+					_pPublicInterface->getHSelf(),
+					L"The session file could not be saved, its previous version is kept:\n\n$STR_REPLACE$",
+					L"Error of saving session XML file",
+					MB_OK | MB_ICONWARNING,
+					0,
+					notice._info.c_str());
+				break;
+			}
 		}
 
-		if (nppParam.consumeSessionSaveFailureNotice(failedPath, lastError))
+		// closed too quickly to have been read: shown once more after the next pause
+		if (::GetTickCount64() - openedTick < unreadMs && !notice._isRequeued)
 		{
-			wstring failureInfo = failedPath;
-			failureInfo += L"\n";
-			failureInfo += GetLastErrorAsString(lastError);
-			_nativeLangSpeaker.messageBox("SessionSaveFailed",
-				_pPublicInterface->getHSelf(),
-				L"The session file could not be saved, its previous version is kept:\n\n$STR_REPLACE$",
-				L"Error of saving session XML file",
-				MB_OK | MB_ICONWARNING,
-				0,
-				failureInfo.c_str());
-			isNoticeShown = true;
+			notice._isRequeued = true;
+			notice._queuedTick = ::GetTickCount64();
+			_backupNotices.push_front(notice);
 		}
 	}
-
-	_isShowingBackupNotice = false;
 }
 
 // The backup file of a renamed untitled tab follows the new name: <backup folder>\<new name>@<time stamp of the backup file>
@@ -9211,13 +9236,13 @@ void Notepad_plus::renameUntitledBackupFile(Buffer* buf, const wstring& newTabNa
 
 	const size_t atPos = oldBackUpFileName.rfind(L'@');
 	const size_t sepPos = oldBackUpFileName.find_last_of(L"\\/");
-	if (atPos == wstring::npos || (sepPos != wstring::npos && atPos < sepPos))
+	if (atPos == wstring::npos || sepPos == wstring::npos || atPos < sepPos)
 	{
-		MainFileManager.onBackupFailure(oldBackUpFileName, ERROR_INVALID_NAME);
+		MainFileManager.onBackupFailure(buf, oldBackUpFileName, ERROR_INVALID_NAME);
 		return;
 	}
 
-	wstring newBackUpFileName = (sepPos == wstring::npos) ? L"" : oldBackUpFileName.substr(0, sepPos + 1);
+	wstring newBackUpFileName = oldBackUpFileName.substr(0, sepPos + 1);
 	newBackUpFileName += newTabName;
 	newBackUpFileName += oldBackUpFileName.substr(atPos);
 
@@ -9226,7 +9251,7 @@ void Notepad_plus::renameUntitledBackupFile(Buffer* buf, const wstring& newTabNa
 
 	if (!::MoveFileExW(oldBackUpFileName.c_str(), newBackUpFileName.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
 	{
-		MainFileManager.onBackupFailure(oldBackUpFileName, ::GetLastError()); // the buffer keeps its old backup file
+		MainFileManager.onBackupFailure(buf, oldBackUpFileName, ::GetLastError()); // the buffer keeps its old backup file
 		return;
 	}
 
@@ -9276,12 +9301,27 @@ bool Notepad_plus::prepareSessionSnapshotRestore(Session& session, wstring& rest
 	else
 		snapshotStamp = SessionSnapshot::makeFileName(now).substr(0, 15);
 
+	// a name is taken by a tab shown in either view, or by an earlier entry of this restore.
+	// The placeholder closed by the loading (the clean empty untitled sole tab of the main view, sub view not shown) does not count.
 	std::vector<wstring> restoredNames;
-	auto isNameTaken = [&restoredNames](const wstring& name) -> bool {
-		for (size_t i = 0, len = MainFileManager.getNbBuffers(); i < len; ++i)
+	const bool isSubViewShown = viewVisible(SUB_VIEW);
+	auto isNameTaken = [this, &restoredNames, isSubViewShown](const wstring& name) -> bool {
+		for (DocTabView* docTab : { &_mainDocTab, &_subDocTab })
 		{
-			if (_wcsicmp(name.c_str(), MainFileManager.getBufferByIndex(i)->getFullPathName()) == 0)
-				return true;
+			if (docTab == &_subDocTab && !isSubViewShown)
+				continue;
+
+			for (size_t i = 0, len = docTab->nbItem(); i < len; ++i)
+			{
+				const Buffer* buf = MainFileManager.getBufferByID(docTab->getBufferByIndex(i));
+				const bool isPlaceholder = docTab == &_mainDocTab && len == 1 && !isSubViewShown
+					&& buf->isUntitled() && !buf->isDirty() && buf->docLength() == 0;
+				if (isPlaceholder)
+					continue;
+
+				if (_wcsicmp(name.c_str(), buf->getFullPathName()) == 0)
+					return true;
+			}
 		}
 		for (const auto& restoredName : restoredNames)
 		{
@@ -9294,6 +9334,7 @@ bool Notepad_plus::prepareSessionSnapshotRestore(Session& session, wstring& rest
 	const wstring separateTabLabel = _nativeLangSpeaker.getLocalizedStrFromID("session-snapshot-restore-separate-tab", L"opened as a separate tab");
 	const wstring failedLabel = _nativeLangSpeaker.getLocalizedStrFromID("session-snapshot-restore-failed", L"could not be restored");
 
+	bool isActiveIndexSet = false;
 	for (size_t i = 0; i < entries.size(); ++i)
 	{
 		sessionFileInfo& sfi = entries[i];
@@ -9381,16 +9422,27 @@ bool Notepad_plus::prepareSessionSnapshotRestore(Session& session, wstring& rest
 			restoredNames.push_back(sfi._fileName);
 		}
 
-		if (i == activeEntry)
+		// the active entry, or the nearest following one if it is not restored
+		if (!isActiveIndexSet && i >= activeEntry)
+		{
 			session._activeMainIndex = session._mainViewFiles.size();
+			isActiveIndexSet = true;
+		}
 		session._mainViewFiles.push_back(std::move(sfi));
 	}
+
+	if (!isActiveIndexSet && !session._mainViewFiles.empty())
+		session._activeMainIndex = session._mainViewFiles.size() - 1;
 
 	return true;
 }
 
-void Notepad_plus::showSessionSnapshotRestoreReport(const wstring& restoreReport)
+void Notepad_plus::finishSessionSnapshotRestore(const wstring& restoreReport)
 {
+	// session.xml lists the restored documents, and the next backup takes a snapshot of them
+	::PostMessage(_pPublicInterface->getHSelf(), NPPM_INTERNAL_SAVECURRENTSESSION, 0, 0);
+	_sessionSnapshotScheduler.markDirty();
+
 	if (restoreReport.empty())
 		return;
 

@@ -141,9 +141,9 @@ public:
 	bool reloadBufferDeferred(BufferID id);
 	SavingStatus saveBuffer(BufferID id, const wchar_t* filename, bool isCopy = false);
 	bool backupCurrentBuffer();
-	bool consumeBackupFailureNotice(std::wstring& failedPath, DWORD& lastError);
 	std::string getBackupContent(const Buffer* buffer, const char* text, size_t length) const;
-	void onBackupFailure(const std::wstring& failedPath, DWORD lastError);
+	void onBackupFailure(const Buffer* buffer, const std::wstring& failedPath, DWORD lastError);
+	void onBackupSuccess(const Buffer* buffer);
 	bool deleteBufferBackup(BufferID id);
 	bool deleteFile(BufferID id);
 	bool moveFile(BufferID id, const wchar_t * newFilename);
@@ -191,8 +191,7 @@ private:
 
 	// per-file backup failures are notified once per failure streak
 	SessionSnapshot::Scheduler _backupFailureLatch;
-	std::wstring _backupFailedPath;
-	DWORD _backupFailedError = ERROR_SUCCESS;
+	const Buffer* _backupFailedBuffer = nullptr; // the last buffer whose backup failed
 
 	Notepad_plus* _pNotepadPlus = nullptr;
 	ScintillaEditView* _pscratchTilla = nullptr;

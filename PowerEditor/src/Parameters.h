@@ -1685,8 +1685,7 @@ public:
 	bool doPrintAndExit() const { return _doPrintAndExit; }
 
 	bool loadSession(Session& session, const wchar_t* sessionFileName, const bool bSuppressErrorMsg = false);
-	bool isSessionSnapshotFile(const wchar_t* sessionFileName) const;
-	bool consumeSessionSaveFailureNotice(std::wstring& failedPath, DWORD& lastError);
+	std::vector<std::wstring> takeSessionSaveFailureNotices();
 
 	void setLoadedSessionFilePath(const std::wstring & loadedSessionFilePath) {
 		_loadedSessionFullFilePath = loadedSessionFilePath;
@@ -1969,8 +1968,7 @@ private:
 
 	// session file save failures are notified once per failure streak
 	SessionSnapshot::Scheduler _sessionSaveFailureLatch;
-	std::wstring _sessionSaveFailedPath;
-	DWORD _sessionSaveFailedError = ERROR_SUCCESS;
+	std::vector<std::wstring> _sessionSaveFailureNotices; // taken by the main window into its notice queue
 
 	bool _isPlaceHolderEnabled = false;
 	bool _theWarningHasBeenGiven = false;

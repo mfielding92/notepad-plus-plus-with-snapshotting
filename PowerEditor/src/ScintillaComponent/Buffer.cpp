@@ -938,6 +938,7 @@ void FileManager::closeBuffer(BufferID id, const ScintillaEditView* identifier)
 
 	if (!refs) // buffer can be deallocated
 	{
+		onBackupSuccess(buf); // a closed buffer no longer fails
 		_pscratchTilla->execute(SCI_RELEASEDOCUMENT, 0, buf->_doc);	//release for FileManager, Document is now gone
 		_buffers.erase(_buffers.begin() + index);
 		delete buf;
@@ -1319,7 +1320,7 @@ bool FileManager::backupCurrentBuffer()
 					{
 						if (!::CreateDirectory(backupFilePath.c_str(), NULL) && !doesDirectoryExist(backupFilePath.c_str()))
 						{
-							onBackupFailure(backupFilePath, ::GetLastError());
+							onBackupFailure(buffer, backupFilePath, ::GetLastError());
 							return false;
 						}
 					}
@@ -1343,13 +1344,22 @@ bool FileManager::backupCurrentBuffer()
 				const DWORD fullpathLen = ::GetFullPathName(backupFilePath.c_str(), MAX_PATH, fullpath, NULL);
 				if (fullpathLen == 0 || fullpathLen >= MAX_PATH)
 				{
-					onBackupFailure(backupFilePath, fullpathLen == 0 ? ::GetLastError() : ERROR_FILENAME_EXCED_RANGE);
+					onBackupFailure(buffer, backupFilePath, fullpathLen == 0 ? ::GetLastError() : ERROR_FILENAME_EXCED_RANGE);
 					return false;
 				}
 
 				if (wcschr(fullpath, '~'))
 				{
-					::GetLongPathName(fullpath, fullpath, MAX_PATH);
+					wchar_t longPath[MAX_PATH]{};
+					const DWORD longPathLen = ::GetLongPathName(fullpath, longPath, MAX_PATH);
+					if (longPathLen >= MAX_PATH)
+					{
+						onBackupFailure(buffer, fullpath, ERROR_FILENAME_EXCED_RANGE);
+						return false;
+					}
+
+					if (longPathLen != 0) // otherwise the full path is kept
+						wcscpy_s(fullpath, MAX_PATH, longPath);
 				}
 
 				// Make sure the backup file is not read only
@@ -1390,13 +1400,13 @@ bool FileManager::backupCurrentBuffer()
 
 					buffer->setModifiedStatus(false);
 
-					_backupFailureLatch.onWriteResult(SessionSnapshot::WriteOutcome::Ok);
+					onBackupSuccess(buffer);
 
 					result = true;	//all done
 				}
 				else // keep the modified status, so it will be retried at the next backup
 				{
-					onBackupFailure(fullpath, lastError);
+					onBackupFailure(buffer, fullpath, lastError);
 				}
 			}
 			else // buffer dirty but unmodified
@@ -1406,18 +1416,24 @@ bool FileManager::backupCurrentBuffer()
 		}
 		else // buffer not dirty, sync: delete the backup file
 		{
+			onBackupSuccess(buffer); // a clean buffer needs no backup
+
 			wstring backupFilePath = buffer->getBackupFileName();
 			if (!backupFilePath.empty())
 			{
 				// delete backup file
-				wstring file2Delete = buffer->getBackupFileName();
-				buffer->setBackupFileName(wstring());
-				result = (::DeleteFile(file2Delete.c_str()) != 0);
+				const bool isDeleted = ::DeleteFile(backupFilePath.c_str()) != FALSE;
+				const DWORD deleteError = isDeleted ? ERROR_SUCCESS : ::GetLastError();
+				if (isDeleted || deleteError == ERROR_FILE_NOT_FOUND || deleteError == ERROR_PATH_NOT_FOUND)
+				{
+					buffer->setBackupFileName(wstring());
 
-				// Session changes, save it
-				hasModifForSession = true;
+					// Session changes, save it
+					hasModifForSession = true;
+				}
+				// else the backup file name is kept: the deletion is retried at the next backup
 			}
-			result = true; // no backup file to delete
+			result = true;
 		}
 	}
 
@@ -1428,22 +1444,27 @@ bool FileManager::backupCurrentBuffer()
 	return result;
 }
 
-void FileManager::onBackupFailure(const std::wstring& failedPath, DWORD lastError)
+// The per-file latch follows the last failing buffer: one notice per failure streak, re-armed only when that buffer recovers or is closed
+void FileManager::onBackupFailure(const Buffer* buffer, const std::wstring& failedPath, DWORD lastError)
 {
-	_backupFailedPath = failedPath;
-	_backupFailedError = lastError;
+	_backupFailedBuffer = buffer;
 	_backupFailureLatch.onWriteResult(SessionSnapshot::WriteOutcome::Failed);
-	_pNotepadPlus->postBackupNotice();
+	if (_backupFailureLatch.consumeFailureNotice())
+	{
+		std::wstring failureInfo = failedPath;
+		failureInfo += L"\n";
+		failureInfo += GetLastErrorAsString(lastError);
+		_pNotepadPlus->queueBackupNotice(Notepad_plus::BackupNoticeKind::perFileBackup, failureInfo);
+	}
 }
 
-bool FileManager::consumeBackupFailureNotice(std::wstring& failedPath, DWORD& lastError)
+void FileManager::onBackupSuccess(const Buffer* buffer)
 {
-	if (!_backupFailureLatch.consumeFailureNotice())
-		return false;
-
-	failedPath = _backupFailedPath;
-	lastError = _backupFailedError;
-	return true;
+	if (buffer != nullptr && buffer == _backupFailedBuffer)
+	{
+		_backupFailedBuffer = nullptr;
+		_backupFailureLatch.onWriteResult(SessionSnapshot::WriteOutcome::Ok);
+	}
 }
 
 bool FileManager::deleteBufferBackup(BufferID id)
@@ -1576,6 +1597,7 @@ SavingStatus FileManager::saveBuffer(BufferID id, const wchar_t* filename, bool 
 	}
 
 	Buffer* buffer = getBufferByID(id);
+	const bool wasDirty = buffer->isDirty();
 	bool isHiddenOrSys = false;
 
 	wchar_t fullpath[MAX_PATH]{};
@@ -1811,6 +1833,8 @@ SavingStatus FileManager::saveBuffer(BufferID id, const wchar_t* filename, bool 
 	if (isCopy) // "Save a Copy As..." command
 	{
 		_pscratchTilla->execute(SCI_SETDOCPOINTER, 0, _scratchDocDefault);
+		if (wasDirty)
+			_pNotepadPlus->markSessionSnapshotDirty();
 		return SavingStatus::SaveOK;	//all done - we don't change the current buffer's path to "fullpath", since it's "Save a Copy As..." action.
 	}
 
@@ -1846,6 +1870,8 @@ SavingStatus FileManager::saveBuffer(BufferID id, const wchar_t* filename, bool 
 		::DeleteFile(backupFilePath.c_str());
 	}
 
+	if (wasDirty)
+		_pNotepadPlus->markSessionSnapshotDirty();
 	return SavingStatus::SaveOK;
 }
 

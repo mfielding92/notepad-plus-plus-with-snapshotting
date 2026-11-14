@@ -216,8 +216,7 @@ namespace SessionSnapshot
 		HANDLE hFile = ::CreateFileW(tmpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 		if (hFile == INVALID_HANDLE_VALUE)
 		{
-			setError(lastError, ::GetLastError());
-			::DeleteFileW(tmpPath.c_str());
+			setError(lastError, ::GetLastError()); // not created by us: left as it is
 			return false;
 		}
 

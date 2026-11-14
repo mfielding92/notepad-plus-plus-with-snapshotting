@@ -917,6 +917,7 @@ void Notepad_plus::doClose(BufferID id, int whichOne, bool doDeleteBackup)
 
 	//Do all the works
 	bool isBufRemoved = removeBufferFromView(id, whichOne);
+	_sessionSnapshotScheduler.markDirty(); // a tab less in the session
 	BufferID hiddenBufferID = BUFFER_INVALID;
 	if (nbDocs == 1 && canHideView(whichOne))
 	{	//close the view if both visible
@@ -2849,29 +2850,29 @@ bool Notepad_plus::fileLoadSession(const wchar_t *fn)
 			Buffer * buf2 = MainFileManager.getBufferByID(_subDocTab.getBufferByIndex(0));
 			isEmptyNpp = (!buf1->isDirty() && buf1->isUntitled() && !buf2->isDirty() && buf2->isUntitled());
 		}
-		// a session snapshot is always restored into this instance
-		if (!isEmptyNpp && (nppGUI._multiInstSetting == multiInstOnSession || nppGUI._multiInstSetting == multiInst) && !nppParam.isSessionSnapshotFile(sessionFileName.c_str()))
+		Session session2Load;
+		if (nppParam.loadSession(session2Load, sessionFileName.c_str()))
 		{
-			wchar_t nppFullPath[MAX_PATH]{};
-			::GetModuleFileName(NULL, nppFullPath, MAX_PATH);
+			// a session snapshot is always restored into this instance
+			if (!isEmptyNpp && (nppGUI._multiInstSetting == multiInstOnSession || nppGUI._multiInstSetting == multiInst) && !session2Load._isSnapshot)
+			{
+				wchar_t nppFullPath[MAX_PATH]{};
+				::GetModuleFileName(NULL, nppFullPath, MAX_PATH);
 
-			wstring args = L"-multiInst -nosession -openSession ";
-			args += L"\"";
-			args += sessionFileName;
-			args += L"\"";
-			if (::ShellExecute(_pPublicInterface->getHSelf(), L"open", nppFullPath, args.c_str(), L".", SW_SHOW) > (HINSTANCE)32)
-				result = true;
-		}
-		else
-		{
-			Session session2Load;
-
-			if (nppParam.loadSession(session2Load, sessionFileName.c_str()))
+				wstring args = L"-multiInst -nosession -openSession ";
+				args += L"\"";
+				args += sessionFileName;
+				args += L"\"";
+				if (::ShellExecute(_pPublicInterface->getHSelf(), L"open", nppFullPath, args.c_str(), L".", SW_SHOW) > (HINSTANCE)32)
+					result = true;
+			}
+			else
 			{
 				wstring restoreReport;
 				const bool isSnapshotMode = prepareSessionSnapshotRestore(session2Load, restoreReport);
 				result = loadSession(session2Load, isSnapshotMode, sessionFileName.c_str());
-				showSessionSnapshotRestoreReport(restoreReport);
+				if (isSnapshotMode)
+					finishSessionSnapshotRestore(restoreReport);
 
 				if (isEmptyNpp && nppGUI._multiInstSetting == multiInstOnSession && !session2Load._isSnapshot) // a session snapshot is never overwritten
 					nppParam.setLoadedSessionFilePath(sessionFileName);

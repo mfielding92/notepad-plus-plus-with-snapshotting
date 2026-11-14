@@ -990,14 +990,14 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 		case NPPM_INTERNAL_SAVECURRENTSESSION:
 		{
 			const NppGUI& nppGui = nppParam.getNppGUI();
+			_sessionSnapshotScheduler.markDirty();
 
 			if (nppGui._rememberLastSession && !nppGui._isCmdlineNosessionActivated && !_isSavingCurrentSession)
 			{
-				_isSavingCurrentSession = true;
+				const ScopedFlag savingCurrentSession(_isSavingCurrentSession);
 				Session currentSession;
 				getCurrentOpenedFiles(currentSession, true);
 				nppParam.writeSession(currentSession);
-				_isSavingCurrentSession = false;
 			}
 			return TRUE;
 		}
@@ -1006,12 +1006,11 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 		{
 			if (nppParam.getNppGUI().isSnapshotMode() && !_isQuitting && !_isInSaveBackup)
 			{
-				_isInSaveBackup = true;
+				const ScopedFlag inSaveBackup(_isInSaveBackup);
 				MainFileManager.backupCurrentBuffer();
 
 				if (_sessionSnapshotScheduler.shouldWrite())
 					saveSessionSnapshot();
-				_isInSaveBackup = false;
 			}
 
 			return TRUE;
@@ -1021,6 +1020,16 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 		{
 			showBackupNotices();
 			return TRUE;
+		}
+
+		case WM_TIMER:
+		{
+			if (wParam == BACKUPNOTICE_TIMER_ID)
+			{
+				onBackupNoticeTimer();
+				return TRUE;
+			}
+			return ::DefWindowProc(hwnd, message, wParam, lParam);
 		}
 
 		case NPPM_INTERNAL_CHANGETABBARICONSET:
@@ -3004,6 +3013,8 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 					scnN.nmhdr.code = NPPN_CANCELSHUTDOWN;
 					_pluginsManager.notify(&scnN);
 					_isQuitting = false;
+					if (!_backupNotices.empty())
+						::PostMessage(hwnd, NPPM_INTERNAL_SHOWBACKUPNOTICE, 0, 0);
 					if (isSnapshotMode)
 						::LockWindowUpdate(NULL);
 
@@ -3112,6 +3123,7 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 
 		case WM_DESTROY:
 		{
+			::KillTimer(hwnd, BACKUPNOTICE_TIMER_ID);
 			killAllChildren();
 			::PostQuitMessage(0);
 			_pPublicInterface->gNppHWND = NULL;

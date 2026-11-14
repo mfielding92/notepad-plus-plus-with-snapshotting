@@ -3196,20 +3196,6 @@ void NppParameters::setWorkingDir(const wchar_t * newPath)
 	}
 }
 
-bool NppParameters::isSessionSnapshotFile(const wchar_t* sessionFileName) const
-{
-	NppXml::Document pXmlSessionDocument = new NppXml::NewDocument();
-	bool isSnapshot = false;
-	if (NppXml::loadFile(pXmlSessionDocument, sessionFileName))
-	{
-		NppXml::Element root = NppXml::firstChildElement(pXmlSessionDocument, "NotepadPlus");
-		NppXml::Element sessionRoot = root ? NppXml::firstChildElement(root, "Session") : NppXml::Element();
-		isSnapshot = sessionRoot && NppXml::attribute(sessionRoot, "snapshotVersion") != nullptr;
-	}
-	delete pXmlSessionDocument;
-	return isSnapshot;
-}
-
 bool NppParameters::loadSession(Session& session, const wchar_t* sessionFileName, const bool bSuppressErrorMsg)
 {
 	NppXml::Document pXmlSessionDocument = new NppXml::NewDocument();
@@ -4929,26 +4915,28 @@ void NppParameters::writeSession(const Session& session, const wchar_t* fileName
 	{
 		::DeleteFileW(sessionPathNameTmp.c_str());
 
-		// no message box from here: the notice is shown later by the main window
+		// no message box from here: the notice is queued and shown later by the main window
 		if (!isEndSessionCritical())
 		{
-			_sessionSaveFailedPath = sessionPathName;
-			_sessionSaveFailedError = lastError;
 			_sessionSaveFailureLatch.onWriteResult(SessionSnapshot::WriteOutcome::Failed);
-			if (Notepad_plus_Window::gNppHWND)
-				::PostMessage(Notepad_plus_Window::gNppHWND, NPPM_INTERNAL_SHOWBACKUPNOTICE, 0, 0);
+			if (_sessionSaveFailureLatch.consumeFailureNotice())
+			{
+				std::wstring failureInfo = sessionPathName;
+				failureInfo += L"\n";
+				failureInfo += GetLastErrorAsString(lastError);
+				_sessionSaveFailureNotices.push_back(failureInfo);
+				if (Notepad_plus_Window::gNppHWND)
+					::PostMessage(Notepad_plus_Window::gNppHWND, NPPM_INTERNAL_SHOWBACKUPNOTICE, 0, 0);
+			}
 		}
 	}
 }
 
-bool NppParameters::consumeSessionSaveFailureNotice(std::wstring& failedPath, DWORD& lastError)
+std::vector<std::wstring> NppParameters::takeSessionSaveFailureNotices()
 {
-	if (!_sessionSaveFailureLatch.consumeFailureNotice())
-		return false;
-
-	failedPath = _sessionSaveFailedPath;
-	lastError = _sessionSaveFailedError;
-	return true;
+	std::vector<std::wstring> notices;
+	notices.swap(_sessionSaveFailureNotices);
+	return notices;
 }
 
 
