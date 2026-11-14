@@ -19,6 +19,7 @@
 #include <mutex>
 #include <cstdio>
 #include "Utf8_16.h"
+#include "SessionSnapshot.h"
 
 
 class Notepad_plus;
@@ -140,6 +141,8 @@ public:
 	bool reloadBufferDeferred(BufferID id);
 	SavingStatus saveBuffer(BufferID id, const wchar_t* filename, bool isCopy = false);
 	bool backupCurrentBuffer();
+	bool consumeBackupFailureNotice(std::wstring& failedPath, DWORD& lastError);
+	std::string getBackupContent(BufferID id);
 	bool deleteBufferBackup(BufferID id);
 	bool deleteFile(BufferID id);
 	bool moveFile(BufferID id, const wchar_t * newFilename);
@@ -184,6 +187,12 @@ private:
 	bool copyFileContentToScintilla(ScintillaEditView* ingestView, FILE* fp, char* data, int64_t fileSize, Utf8_16_Read* unicodeConvertor, LoadedFileFormat& fileFormat, EolType& format, int& sciStatus, const DocumentFillPolicy& policy);
 	void resolveLoadedEncoding(int& encodingOut, UniMode& unicodeModeOut) const;
 	LangType detectLanguageFromTextBeginning(const unsigned char *data, size_t dataLen);
+	void onBackupFailure(const std::wstring& failedPath, DWORD lastError);
+
+	// periodic backup failures are notified once per failure streak
+	SessionSnapshot::Scheduler _backupFailureLatch;
+	std::wstring _backupFailedPath;
+	DWORD _backupFailedError = ERROR_SUCCESS;
 
 	Notepad_plus* _pNotepadPlus = nullptr;
 	ScintillaEditView* _pscratchTilla = nullptr;

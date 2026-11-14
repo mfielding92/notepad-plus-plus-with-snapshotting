@@ -5610,6 +5610,8 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 			::SendDlgItemMessage(_hSelf, IDC_BACKUPDIR_RESTORESESSION_CHECK, BM_SETCHECK, snapshotCheck?BST_CHECKED:BST_UNCHECKED, 0);
 			auto periodicBackupInSec = static_cast<UINT>(nppGUI._snapshotBackupTiming / 1000);
 			::SetDlgItemInt(_hSelf, IDC_BACKUPDIR_RESTORESESSION_EDIT,periodicBackupInSec, FALSE);
+			::SendDlgItemMessage(_hSelf, IDC_BACKUPDIR_SNAPSHOT_RETENTION_EDIT, EM_LIMITTEXT, 4, 0);
+			::SetDlgItemInt(_hSelf, IDC_BACKUPDIR_SNAPSHOT_RETENTION_EDIT, nppGUI._sessionSnapshotRetentionHours, FALSE);
 			wstring backupFilePath = NppParameters::getInstance().getUserPath();
 			backupFilePath += L"\\backup\\";
 			::SetDlgItemText(_hSelf, IDD_BACKUPDIR_RESTORESESSION_PATH_EDIT, backupFilePath.c_str());
@@ -5638,6 +5640,7 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 
 			updateBackupSessionGUI();
 			updateBackupOnSaveGUI();
+			updateSnapshotPath();
 
 			return TRUE;
 		}
@@ -5659,7 +5662,10 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 
 			bool isStaticText = (dlgCtrlID == IDD_BACKUPDIR_RESTORESESSION_STATIC1 ||
 				dlgCtrlID == IDD_BACKUPDIR_RESTORESESSION_STATIC2 ||
-				dlgCtrlID == IDD_BACKUPDIR_RESTORESESSION_PATHLABEL_STATIC);
+				dlgCtrlID == IDD_BACKUPDIR_RESTORESESSION_PATHLABEL_STATIC ||
+				dlgCtrlID == IDD_BACKUPDIR_SNAPSHOT_RETENTION_STATIC1 ||
+				dlgCtrlID == IDD_BACKUPDIR_SNAPSHOT_RETENTION_STATIC2 ||
+				dlgCtrlID == IDD_BACKUPDIR_SNAPSHOT_PATHLABEL_STATIC);
 			//set the static text colors to show enable/disable instead of ::EnableWindow which causes blurry text
 			if (isStaticText)
 			{
@@ -5673,7 +5679,7 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 				return NppDarkMode::onCtlColorDlgStaticText(hdcStatic, isTextEnabled);
 			}
 
-			if (dlgCtrlID == IDD_BACKUPDIR_RESTORESESSION_PATH_EDIT)
+			if (dlgCtrlID == IDD_BACKUPDIR_RESTORESESSION_PATH_EDIT || dlgCtrlID == IDD_BACKUPDIR_SNAPSHOT_PATH_EDIT)
 			{
 				return NppDarkMode::onCtlColor(hdcStatic);
 			}
@@ -5700,6 +5706,7 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 						wchar_t inputDir[MAX_PATH] = {'\0'};
 						::SendDlgItemMessage(_hSelf, IDC_BACKUPDIR_EDIT, WM_GETTEXT, MAX_PATH, reinterpret_cast<LPARAM>(inputDir));
 						nppGUI._backupDir = inputDir;
+						updateSnapshotPath();
 						return TRUE;
 					}
 
@@ -5722,6 +5729,26 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 						}
 						return TRUE;
 					}
+
+					case IDC_BACKUPDIR_SNAPSHOT_RETENTION_EDIT:
+					{
+						constexpr int stringSize = 16;
+						wchar_t str[stringSize]{};
+
+						::GetDlgItemText(_hSelf, IDC_BACKUPDIR_SNAPSHOT_RETENTION_EDIT, str, stringSize);
+
+						if (lstrcmp(str, L"") == 0)
+							return TRUE;
+
+						UINT retentionHours = ::GetDlgItemInt(_hSelf, IDC_BACKUPDIR_SNAPSHOT_RETENTION_EDIT, NULL, FALSE);
+						if (retentionHours > SessionSnapshot::MAX_RETENTION_HOURS)
+						{
+							retentionHours = SessionSnapshot::MAX_RETENTION_HOURS;
+							::SetDlgItemInt(_hSelf, IDC_BACKUPDIR_SNAPSHOT_RETENTION_EDIT, retentionHours, FALSE);
+						}
+						nppGUI._sessionSnapshotRetentionHours = retentionHours;
+						return TRUE;
+					}
 				}
 			}
 			else if (HIWORD(wParam) == EN_KILLFOCUS)
@@ -5740,6 +5767,21 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 						{
 							::SetDlgItemInt(_hSelf, IDC_BACKUPDIR_RESTORESESSION_EDIT, static_cast<UINT>(nppGUI._snapshotBackupTiming / 1000), FALSE);
 						}
+						break;
+					}
+
+					case IDC_BACKUPDIR_SNAPSHOT_RETENTION_EDIT:
+					{
+						static constexpr int stringSize = 16;
+						wchar_t str[stringSize]{};
+
+						::GetDlgItemText(_hSelf, IDC_BACKUPDIR_SNAPSHOT_RETENTION_EDIT, str, stringSize);
+
+						if (lstrcmp(str, L"") == 0)
+						{
+							::SetDlgItemInt(_hSelf, IDC_BACKUPDIR_SNAPSHOT_RETENTION_EDIT, nppGUI._sessionSnapshotRetentionHours, FALSE);
+						}
+						break;
 					}
 				}
 			}
@@ -5802,6 +5844,7 @@ intptr_t CALLBACK BackupSubDlg::run_dlgProc(UINT message, WPARAM wParam, LPARAM 
 				{
 					nppGUI._useDir = !nppGUI._useDir;
 					updateBackupOnSaveGUI();
+					updateSnapshotPath();
 					return TRUE;
 				}
 				case IDD_BACKUPDIR_BROWSE_BUTTON :
@@ -5829,10 +5872,23 @@ void BackupSubDlg::updateBackupSessionGUI()
 	::EnableWindow(::GetDlgItem(_hSelf, IDC_BACKUPDIR_RESTORESESSION_CHECK), rememberSession);
 	::EnableWindow(::GetDlgItem(_hSelf, IDC_BACKUPDIR_RESTORESESSION_EDIT), isSnapshot);
 	::EnableWindow(::GetDlgItem(_hSelf, IDD_BACKUPDIR_RESTORESESSION_PATH_EDIT), isSnapshot);
+	::EnableWindow(::GetDlgItem(_hSelf, IDC_BACKUPDIR_SNAPSHOT_RETENTION_EDIT), isSnapshot);
+	::EnableWindow(::GetDlgItem(_hSelf, IDD_BACKUPDIR_SNAPSHOT_PATH_EDIT), isSnapshot);
 
 	redrawDlgItem(IDD_BACKUPDIR_RESTORESESSION_STATIC1);
 	redrawDlgItem(IDD_BACKUPDIR_RESTORESESSION_STATIC2);
 	redrawDlgItem(IDD_BACKUPDIR_RESTORESESSION_PATHLABEL_STATIC);
+	redrawDlgItem(IDD_BACKUPDIR_SNAPSHOT_RETENTION_STATIC1);
+	redrawDlgItem(IDD_BACKUPDIR_SNAPSHOT_RETENTION_STATIC2);
+	redrawDlgItem(IDD_BACKUPDIR_SNAPSHOT_PATHLABEL_STATIC);
+}
+
+void BackupSubDlg::updateSnapshotPath()
+{
+	NppParameters& nppParam = NppParameters::getInstance();
+	const NppGUI& nppGUI = nppParam.getNppGUI();
+	wstring snapshotPath = SessionSnapshot::resolveDir(nppGUI._useDir, nppGUI._backupDir, nppParam.getUserPath());
+	::SetDlgItemText(_hSelf, IDD_BACKUPDIR_SNAPSHOT_PATH_EDIT, snapshotPath.c_str());
 }
 
 void BackupSubDlg::updateBackupOnSaveGUI()

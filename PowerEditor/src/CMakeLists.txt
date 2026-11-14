@@ -91,6 +91,7 @@ SET(src_files
 			./ScintillaComponent/columnEditor.cpp
 			./MISC/Common/Common.cpp
 			./MISC/Common/FileInterface.cpp
+			./MISC/Common/SessionSnapshot.cpp
 			./MISC/Common/SortLocale.cpp
 			./WinControls/ContextMenu/ContextMenu.cpp
 			./WinControls/OpenSaveFileDialog/CustomFileDialog.cpp
@@ -239,6 +240,7 @@ SET(include_files
 			./ScintillaComponent/columnEditor.h
 			./MISC/Common/Common.h
 			./MISC/Common/FileInterface.h
+			./MISC/Common/SessionSnapshot.h
 			./WinControls/ContextMenu/ContextMenu.h
 			./WinControls/OpenSaveFileDialog/CustomFileDialog.h
 			./WinControls/PluginsAdmin/pluginsAdmin.h

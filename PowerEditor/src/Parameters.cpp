@@ -3427,6 +3427,8 @@ bool NppParameters::getSessionFromXmlTree(const NppXml::Document& pSessionDoc, S
 		return false;
 
 	bool bNeedsSessionXmlFileUpdateAfter = false;
+	const bool isSessionSnapshot = NppXml::attribute(sessionRoot, "snapshotVersion") != nullptr; // a session snapshot file is never modified
+	session._isSnapshot = isSessionSnapshot;
 
 	const int index = NppXml::intAttribute(sessionRoot, "activeView", -1);
 	if (index >= 0)
@@ -3655,6 +3657,24 @@ bool NppParameters::getSessionFromXmlTree(const NppXml::Document& pSessionDoc, S
 							sfi._foldStates.push_back(static_cast<size_t>(lineNumber));
 						}
 					}
+
+					// session snapshot: the document content
+					NppXml::Element contentNode = NppXml::firstChildElement(childNode, "Content");
+					if (contentNode)
+					{
+						const char* contentEncoding = NppXml::attribute(contentNode, "encoding", "");
+						if (std::strcmp(contentEncoding, "base64") == 0)
+						{
+							NppXml::Node textNode = NppXml::firstChild(contentNode);
+							const char* text = textNode ? NppXml::getValue(textNode) : "";
+							const int64_t byteLength = NppXml::int64Attribute(contentNode, "byteLength", -1);
+							sfi._hasSnapshotContent = SessionSnapshot::base64Decode(text, sfi._snapshotContent)
+								&& (byteLength == -1 || static_cast<uint64_t>(byteLength) == sfi._snapshotContent.length());
+							if (!sfi._hasSnapshotContent)
+								sfi._snapshotContent.clear();
+						}
+					}
+
 					if (k == 0)
 						session._mainViewFiles.push_back(sfi);
 					else // k == 1
@@ -3748,7 +3768,7 @@ bool NppParameters::getSessionFromXmlTree(const NppXml::Document& pSessionDoc, S
 		}
 	}
 
-	if (bNeedsSessionXmlFileUpdateAfter && !sessionDocFileName.empty())
+	if (bNeedsSessionXmlFileUpdateAfter && !isSessionSnapshot && !sessionDocFileName.empty())
 		static_cast<void>(NppXml::saveFile(pSessionDoc, sessionDocFileName));
 
 	return true;
@@ -4839,29 +4859,62 @@ void NppParameters::writeSession(const Session& session, const wchar_t* fileName
 	removeReadOnlyFlagFromFileAttributes(sessionPathName);
 
 	//
-	// Backup session file before overriting it
+	// Write the session into a temporary file: the current session file stays untouched until the new one is complete and valid
 	//
-	std::wstring backupPathName;
-	BOOL doesBackupCopyExist = FALSE;
-	if (doesFileExist(sessionPathName))
-	{
-		backupPathName = sessionPathName;
-		backupPathName += SESSION_BACKUP_EXT;
+	const std::string sessionXml = sessionToXml(session);
+	std::wstring sessionPathNameTmp = sessionPathName;
+	sessionPathNameTmp += L".tmp";
+	bool sessionSaveOK = SessionSnapshot::writeFileAtomic(sessionPathNameTmp, sessionXml.c_str(), sessionXml.length());
 
-		// Make sure backup file is not read-only, if it exists
-		removeReadOnlyFlagFromFileAttributes(backupPathName.c_str());
-		doesBackupCopyExist = CopyFile(sessionPathName, backupPathName.c_str(), FALSE);
-		if (!doesBackupCopyExist && !isEndSessionCritical())
+	//
+	// Double checking: prevent written session file corrupted while writting
+	//
+	if (sessionSaveOK)
+	{
+		NppXml::Document pXmlSessionCheck = new NppXml::NewDocument();
+		sessionSaveOK = NppXml::loadFile(pXmlSessionCheck, sessionPathNameTmp);
+		if (sessionSaveOK)
 		{
-			std::wstring errTitle = L"Session file backup error: ";
-			errTitle += GetLastErrorAsString(0);
-			NppDarkMode::darkMessageBoxW(nullptr, sessionPathName, errTitle.c_str(), MB_OK);
+			Session sessionCheck;
+			sessionSaveOK = getSessionFromXmlTree(pXmlSessionCheck, sessionCheck); // test only
 		}
+		delete pXmlSessionCheck;
 	}
 
-	//
-	// Prepare for writing
-	//
+	if (sessionSaveOK)
+	{
+		//
+		// Backup session file before overriting it
+		//
+		if (doesFileExist(sessionPathName))
+		{
+			std::wstring backupPathName = sessionPathName;
+			backupPathName += SESSION_BACKUP_EXT;
+
+			// Make sure backup file is not read-only, if it exists
+			removeReadOnlyFlagFromFileAttributes(backupPathName.c_str());
+			if (!CopyFile(sessionPathName, backupPathName.c_str(), FALSE) && !isEndSessionCritical())
+			{
+				std::wstring errTitle = L"Session file backup error: ";
+				errTitle += GetLastErrorAsString(0);
+				NppDarkMode::darkMessageBoxW(nullptr, sessionPathName, errTitle.c_str(), MB_OK);
+			}
+		}
+
+		sessionSaveOK = ::MoveFileExW(sessionPathNameTmp.c_str(), sessionPathName, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+	}
+
+	if (!sessionSaveOK)
+	{
+		::DeleteFileW(sessionPathNameTmp.c_str());
+		if (!isEndSessionCritical())
+			NppDarkMode::darkMessageBoxW(nullptr, sessionPathName, L"Error of saving session XML file", MB_OK | MB_APPLMODAL | MB_ICONWARNING);
+	}
+}
+
+
+std::string NppParameters::sessionToXml(const Session& session, const SYSTEMTIME* snapshotTime)
+{
 	NppXml::Document pXmlSessionDoc = new NppXml::NewDocument();
 	NppXml::createNewDeclaration(pXmlSessionDoc);
 	NppXml::Element root = NppXml::createChildElement(pXmlSessionDoc, "NotepadPlus");
@@ -4870,6 +4923,16 @@ void NppParameters::writeSession(const Session& session, const wchar_t* fileName
 	{
 		NppXml::Element sessionNode = NppXml::createChildElement(root, "Session");
 		NppXml::setAttribute(sessionNode, "activeView", session._activeView);
+
+		if (snapshotTime)
+		{
+			char snapshotTimeStr[32]{};
+			std::snprintf(snapshotTimeStr, sizeof(snapshotTimeStr), "%04u-%02u-%02u %02u:%02u:%02u",
+				static_cast<unsigned>(snapshotTime->wYear), static_cast<unsigned>(snapshotTime->wMonth), static_cast<unsigned>(snapshotTime->wDay),
+				static_cast<unsigned>(snapshotTime->wHour), static_cast<unsigned>(snapshotTime->wMinute), static_cast<unsigned>(snapshotTime->wSecond));
+			NppXml::setAttribute(sessionNode, "snapshotVersion", 1);
+			NppXml::setAttribute(sessionNode, "snapshotTime", snapshotTimeStr);
+		}
 
 		struct ViewElem {
 			NppXml::Element viewNode;
@@ -4938,6 +5001,21 @@ void NppParameters::writeSession(const Session& session, const wchar_t* fileName
 					NppXml::Element foldNode = NppXml::createChildElement(fileNameNode, "Fold");
 					NppXml::setAttribute(foldNode, "line", foldLine);
 				}
+
+				if (snapshotTime)
+				{
+					if (vsFile._hasSnapshotContent)
+					{
+						NppXml::Element contentNode = NppXml::createChildElement(fileNameNode, "Content");
+						NppXml::setAttribute(contentNode, "encoding", "base64");
+						NppXml::setAttribute(contentNode, "byteLength", vsFile._snapshotContent.length());
+						NppXml::createChildText(contentNode, SessionSnapshot::base64Encode(vsFile._snapshotContent.c_str(), vsFile._snapshotContent.length()));
+					}
+					else if (vsFile._isSnapshotContentOmitted)
+					{
+						NppXml::setAttribute(fileNameNode, "contentOmitted", "largeFile");
+					}
+				}
 			}
 		}
 
@@ -4960,58 +5038,19 @@ void NppParameters::writeSession(const Session& session, const wchar_t* fileName
 		}
 	}
 
-	//
-	// Write the session file
-	//
-	bool sessionSaveOK = NppXml::saveFile(pXmlSessionDoc, sessionPathName);
-
-	//
-	// Double checking: prevent written session file corrupted while writting
-	//
-	if (sessionSaveOK)
-	{
-		NppXml::Document pXmlSessionCheck = new NppXml::NewDocument();
-		sessionSaveOK = NppXml::loadFile(pXmlSessionCheck, sessionPathName);
-		if (sessionSaveOK)
-		{
-			Session sessionCheck;
-			sessionSaveOK = getSessionFromXmlTree(pXmlSessionCheck, sessionCheck); // test only
-		}
-		delete pXmlSessionCheck;
-	}
-	else if (!isEndSessionCritical())
-	{
-		NppDarkMode::darkMessageBoxW(nullptr, sessionPathName, L"Error of saving session XML file", MB_OK | MB_APPLMODAL | MB_ICONWARNING);
-	}
-
-	//
-	// If error after double checking, restore session backup file
-	//
-	if (!sessionSaveOK)
-	{
-		if (doesBackupCopyExist) // session backup file exists, restore it
-		{
-			if (!isEndSessionCritical())
-				NppDarkMode::darkMessageBoxW(nullptr, backupPathName.c_str(), L"Saving session error - restoring from the backup:", MB_OK | MB_APPLMODAL | MB_ICONWARNING);
-
-			std::wstring sessionPathNameFail2Load = sessionPathName;
-			sessionPathNameFail2Load += L".fail2Load";
-			ReplaceFile(sessionPathName, backupPathName.c_str(), sessionPathNameFail2Load.c_str(), REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS, 0, 0);
-		}
-	}
-	/*
-	 * Keep session backup file in case of corrupted session file
-	 *
-	else
-	{
-		if (backupPathName[0]) // session backup file not useful, delete it
-		{
-			::DeleteFile(backupPathName);
-		}
-	}
-	*/
-
+	std::string xml = NppXml::saveToString(pXmlSessionDoc);
 	delete pXmlSessionDoc;
+
+	// CRLF eol, the same bytes as NppXml::saveFile writes
+	std::string xmlCrlf;
+	xmlCrlf.reserve(xml.length() + xml.length() / 16);
+	for (char c : xml)
+	{
+		if (c == '\n')
+			xmlCrlf.push_back('\r');
+		xmlCrlf.push_back(c);
+	}
+	return xmlCrlf;
 }
 
 
@@ -6751,7 +6790,7 @@ void NppParameters::feedGUIParameters(const NppXml::Element& element)
 		{
 			feedScintillaParam(childNode);
 		}
-		// <GUIConfig name="Backup" action="0" useCustumDir="no" dir="" isSnapshotMode="yes" snapshotBackupTiming="7000" />
+		// <GUIConfig name="Backup" action="0" useCustumDir="no" dir="" isSnapshotMode="yes" snapshotBackupTiming="7000" sessionSnapshotRetentionHours="24" />
 		else if (std::strcmp(nm, "Backup") == 0)
 		{
 			{
@@ -6765,6 +6804,9 @@ void NppParameters::feedGUIParameters(const NppXml::Element& element)
 			_nppGUI._isSnapshotMode = getBoolAttribute(childNode, "isSnapshotMode", _nppGUI._isSnapshotMode);
 			_nppGUI._snapshotBackupTiming = static_cast<size_t>(NppXml::uint64Attribute(childNode, "snapshotBackupTiming", _nppGUI._snapshotBackupTiming));
 
+			_nppGUI._sessionSnapshotRetentionHours = NppXml::uintAttribute(childNode, "sessionSnapshotRetentionHours", _nppGUI._sessionSnapshotRetentionHours);
+			if (_nppGUI._sessionSnapshotRetentionHours > SessionSnapshot::MAX_RETENTION_HOURS)
+				_nppGUI._sessionSnapshotRetentionHours = SessionSnapshot::MAX_RETENTION_HOURS;
 		}
 		
 		else if (std::strcmp(nm, "DockingManager") == 0)
@@ -7945,7 +7987,7 @@ void NppParameters::createXmlTreeFromGUIParams()
 		writePrintSetting(GUIConfigElement);
 	}
 
-	// <GUIConfig name="Backup" action="0" useCustumDir="no" dir="" isSnapshotMode="yes" snapshotBackupTiming="7000" />
+	// <GUIConfig name="Backup" action="0" useCustumDir="no" dir="" isSnapshotMode="yes" snapshotBackupTiming="7000" sessionSnapshotRetentionHours="24" />
 	{
 		NppXml::Element GUIConfigElement = NppXml::createChildElement(newGUIRoot, "GUIConfig");
 		NppXml::setAttribute(GUIConfigElement, "name", "Backup");
@@ -7955,6 +7997,7 @@ void NppParameters::createXmlTreeFromGUIParams()
 
 		setBoolAttribute(GUIConfigElement, "isSnapshotMode", _nppGUI._isSnapshotMode);
 		NppXml::setAttribute(GUIConfigElement, "snapshotBackupTiming", _nppGUI._snapshotBackupTiming);
+		NppXml::setAttribute(GUIConfigElement, "sessionSnapshotRetentionHours", _nppGUI._sessionSnapshotRetentionHours);
 	}
 
 	// <GUIConfig name="TaskList">yes</GUIConfig>

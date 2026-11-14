@@ -6585,7 +6585,7 @@ bool Notepad_plus::getIntegralDockingData(DockedWidgetData & dockData, int & iCo
 }
 
 
-void Notepad_plus::getCurrentOpenedFiles(Session & session, bool includeUntitledDoc)
+void Notepad_plus::getCurrentOpenedFiles(Session & session, bool includeUntitledDoc, bool includeSnapshotContent)
 {
 	_mainEditView.saveCurrentPos();	//save position so itll be correct in the session
 	_subEditView.saveCurrentPos();	//both views
@@ -6641,6 +6641,19 @@ void Notepad_plus::getCurrentOpenedFiles(Session & session, bool includeUntitled
 			sfi._isMonitoring = buf->isMonitoringOn();
 			sfi._individualTabColour = docTab[k]->getIndividualTabColourId(static_cast<int>(i));
 			sfi._isRTL = buf->isRTL();
+
+			if (includeSnapshotContent && (buf->isDirty() || buf->isUntitled()))
+			{
+				if (buf->isLargeFile())
+				{
+					sfi._isSnapshotContentOmitted = true;
+				}
+				else
+				{
+					sfi._snapshotContent = MainFileManager.getBackupContent(bufID);
+					sfi._hasSnapshotContent = true;
+				}
+			}
 
 			_invisibleEditView.execute(SCI_SETDOCPOINTER, 0, buf->getDocument());
 
@@ -7115,9 +7128,9 @@ std::vector<wstring> Notepad_plus::loadCommandlineParams(const wchar_t * command
 		const wchar_t* sessionFileName = fnss.getFileName(0);
 		if (nppParams.loadSession(session2Load, sessionFileName))
 		{
-			const bool isSnapshotMode = false;
+			const bool isSnapshotMode = restoreSessionSnapshotContent(session2Load);
 
-			if (nppGUI._multiInstSetting == multiInstOnSession)
+			if (nppGUI._multiInstSetting == multiInstOnSession && !session2Load._isSnapshot) // a session snapshot is never overwritten
 				nppParams.setLoadedSessionFilePath(sessionFileName);
 			loadSession(session2Load, isSnapshotMode, sessionFileName);
 		}
@@ -8977,9 +8990,15 @@ void Notepad_plus::refreshInternalPanelIcons()
 
 void Notepad_plus::launchDocumentBackupTask()
 {
+	if (_isBackupTaskLaunched)
+		return;
+
 	HANDLE hThread = ::CreateThread(NULL, 0, backupDocument, NULL, 0, NULL);
 	if (hThread)
+	{
+		_isBackupTaskLaunched = true;
 		::CloseHandle(hThread);
+	}
 }
 
 
@@ -8987,7 +9006,8 @@ DWORD WINAPI Notepad_plus::backupDocument(void * /*param*/)
 {
 	NppGUI& nppGUI = (NppParameters::getInstance()).getNppGUI();
 
-	while (!g_bNppExitFlag.load() && nppGUI.isSnapshotMode())
+	// The thread lives as long as Notepad++: the snapshot mode can be switched off and on again while running
+	while (!g_bNppExitFlag.load())
 	{
 		size_t timer = nppGUI._snapshotBackupTiming;
 		if (timer < 1000)
@@ -8995,13 +9015,198 @@ DWORD WINAPI Notepad_plus::backupDocument(void * /*param*/)
 
 		::Sleep(DWORD(timer));
 
-		if (g_bNppExitFlag.load() || !nppGUI.isSnapshotMode())
+		if (g_bNppExitFlag.load())
 			break;
 
-		::SendMessage(Notepad_plus_Window::gNppHWND, NPPM_INTERNAL_SAVEBACKUP, 0, 0);
+		if (nppGUI.isSnapshotMode())
+			::SendMessage(Notepad_plus_Window::gNppHWND, NPPM_INTERNAL_SAVEBACKUP, 0, 0);
 	}
 
 	return ERROR_SUCCESS;
+}
+
+void Notepad_plus::saveSessionSnapshot()
+{
+	NppParameters& nppParam = NppParameters::getInstance();
+	const NppGUI& nppGUI = nppParam.getNppGUI();
+
+	SYSTEMTIME now{};
+	::GetLocalTime(&now);
+
+	Session snapshotSession;
+	getCurrentOpenedFiles(snapshotSession, true, true);
+	const std::string snapshotXml = nppParam.sessionToXml(snapshotSession, &now);
+	const wstring snapshotFileName = SessionSnapshot::makeFileName(now);
+
+	auto writeSnapshot = [&snapshotXml, &snapshotFileName](const wstring& dir, wstring& path, DWORD& lastError) -> bool {
+		path = dir;
+		if (!path.empty() && path.back() != L'\\')
+			path += L'\\';
+		path += snapshotFileName;
+		return SessionSnapshot::ensureDir(dir, &lastError) && SessionSnapshot::writeFileAtomic(path, snapshotXml.c_str(), snapshotXml.length(), &lastError);
+	};
+
+	const wstring& userPath = nppParam.getUserPath();
+	const wstring snapshotDir = SessionSnapshot::resolveDir(nppGUI._useDir, nppGUI._backupDir, userPath);
+	const wstring defaultDir = SessionSnapshot::resolveDir(false, L"", userPath);
+
+	SessionSnapshot::WriteOutcome outcome = SessionSnapshot::WriteOutcome::Failed;
+	wstring snapshotPath;
+	wstring fallbackPath;
+	DWORD lastError = ERROR_SUCCESS;
+	DWORD fallbackLastError = ERROR_SUCCESS;
+	if (writeSnapshot(snapshotDir, snapshotPath, lastError))
+	{
+		outcome = SessionSnapshot::WriteOutcome::Ok;
+	}
+	else if (::CompareStringOrdinal(snapshotDir.c_str(), -1, defaultDir.c_str(), -1, TRUE) != CSTR_EQUAL)
+	{
+		if (writeSnapshot(defaultDir, fallbackPath, fallbackLastError))
+			outcome = SessionSnapshot::WriteOutcome::OkFallback;
+	}
+
+	_sessionSnapshotScheduler.onWriteResult(outcome);
+
+	// old snapshots are removed only once a newer one is on disk
+	if (outcome != SessionSnapshot::WriteOutcome::Failed)
+	{
+		const ULONGLONG nowTick = ::GetTickCount64();
+		if (_sessionSnapshotScheduler.shouldPrune(nowTick))
+		{
+			SessionSnapshot::prune(outcome == SessionSnapshot::WriteOutcome::Ok ? snapshotDir : defaultDir, now, nppGUI._sessionSnapshotRetentionHours);
+			_sessionSnapshotScheduler.onPruned(nowTick);
+		}
+	}
+
+	if (_sessionSnapshotScheduler.consumeFailureNotice() && !nppParam.isEndSessionCritical())
+	{
+		wstring failureInfo = snapshotPath;
+		failureInfo += L"\n";
+		failureInfo += GetLastErrorAsString(lastError);
+
+		if (outcome == SessionSnapshot::WriteOutcome::OkFallback)
+		{
+			failureInfo += L"\n";
+			failureInfo += fallbackPath;
+			_nativeLangSpeaker.messageBox("SessionSnapshotFallback",
+				_pPublicInterface->getHSelf(),
+				L"The session snapshot could not be written into the configured backup folder, so it has been saved into the default backup folder (last path below):\n\n$STR_REPLACE$",
+				L"Session snapshot saved into the default backup folder",
+				MB_OK | MB_ICONWARNING,
+				0,
+				failureInfo.c_str());
+		}
+		else
+		{
+			if (!fallbackPath.empty())
+			{
+				failureInfo += L"\n";
+				failureInfo += fallbackPath;
+				failureInfo += L"\n";
+				failureInfo += GetLastErrorAsString(fallbackLastError);
+			}
+			_nativeLangSpeaker.messageBox("SessionSnapshotFailed",
+				_pPublicInterface->getHSelf(),
+				L"The session snapshot could not be written:\n\n$STR_REPLACE$\n\nNotepad++ will try again at the next backup.",
+				L"Session snapshot failed",
+				MB_OK | MB_ICONWARNING,
+				0,
+				failureInfo.c_str());
+		}
+	}
+}
+
+void Notepad_plus::notifyBackupFailure()
+{
+	wstring failedPath;
+	DWORD lastError = ERROR_SUCCESS;
+	if (MainFileManager.consumeBackupFailureNotice(failedPath, lastError) && !NppParameters::getInstance().isEndSessionCritical())
+	{
+		wstring failureInfo = failedPath;
+		failureInfo += L"\n";
+		failureInfo += GetLastErrorAsString(lastError);
+		_nativeLangSpeaker.messageBox("PeriodicBackupFailed",
+			_pPublicInterface->getHSelf(),
+			L"The backup of a modified document could not be written:\n\n$STR_REPLACE$\n\nNotepad++ will try again at the next backup.",
+			L"Backup failed",
+			MB_OK | MB_ICONWARNING,
+			0,
+			failureInfo.c_str());
+	}
+}
+
+// Session snapshot loaded by the user: each document content is written into a new backup file,
+// so the session can be loaded in the snapshot mode. The snapshot file itself is never modified.
+bool Notepad_plus::restoreSessionSnapshotContent(Session& session)
+{
+	bool hasSnapshotContent = false;
+	for (const auto& viewFiles : { &session._mainViewFiles, &session._subViewFiles })
+	{
+		for (const auto& sfi : *viewFiles)
+		{
+			if (sfi._hasSnapshotContent)
+				hasSnapshotContent = true;
+		}
+	}
+
+	if (!hasSnapshotContent)
+		return false;
+
+	wstring backupDir = NppParameters::getInstance().getUserPath();
+	backupDir += L"\\backup";
+	const bool isBackupDirOK = SessionSnapshot::ensureDir(backupDir);
+
+	SYSTEMTIME now{};
+	::GetLocalTime(&now);
+	wchar_t timeStamp[32]{};
+	swprintf(timeStamp, _countof(timeStamp), L"@%04u-%02u-%02u_%02u%02u%02u",
+		static_cast<unsigned>(now.wYear), static_cast<unsigned>(now.wMonth), static_cast<unsigned>(now.wDay),
+		static_cast<unsigned>(now.wHour), static_cast<unsigned>(now.wMinute), static_cast<unsigned>(now.wSecond));
+
+	wstring failedFiles;
+	for (auto viewFiles : { &session._mainViewFiles, &session._subViewFiles })
+	{
+		for (auto& sfi : *viewFiles)
+		{
+			// a document without content in the snapshot is loaded from its file, never from a backup shared with another document
+			sfi._backupFilePath.clear();
+
+			if (!sfi._hasSnapshotContent)
+				continue;
+
+			wstring backupPath = backupDir;
+			backupPath += L"\\";
+			backupPath += ::PathFindFileNameW(sfi._fileName.c_str());
+			backupPath += timeStamp;
+
+			wstring freePath = backupPath;
+			for (int i = 1; doesPathExist(freePath.c_str()); ++i)
+				freePath = backupPath + L"_" + std::to_wstring(i);
+
+			if (isBackupDirOK && SessionSnapshot::writeFileAtomic(freePath, sfi._snapshotContent.c_str(), sfi._snapshotContent.length()))
+			{
+				sfi._backupFilePath = freePath;
+			}
+			else
+			{
+				failedFiles += sfi._fileName;
+				failedFiles += L"\n";
+			}
+		}
+	}
+
+	if (!failedFiles.empty())
+	{
+		_nativeLangSpeaker.messageBox("SessionSnapshotRestoreFailed",
+			_pPublicInterface->getHSelf(),
+			L"The content of the following documents could not be restored from the session snapshot:\n\n$STR_REPLACE$",
+			L"Session snapshot restore",
+			MB_OK | MB_ICONWARNING,
+			0,
+			failedFiles.c_str());
+	}
+
+	return true;
 }
 
 

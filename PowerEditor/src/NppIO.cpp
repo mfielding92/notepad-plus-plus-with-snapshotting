@@ -2906,10 +2906,10 @@ bool Notepad_plus::fileLoadSession(const wchar_t *fn)
 
 			if (nppParam.loadSession(session2Load, sessionFileName.c_str()))
 			{
-				const bool isSnapshotMode = false;
+				const bool isSnapshotMode = restoreSessionSnapshotContent(session2Load);
 				result = loadSession(session2Load, isSnapshotMode, sessionFileName.c_str());
 
-				if (isEmptyNpp && nppGUI._multiInstSetting == multiInstOnSession)
+				if (isEmptyNpp && nppGUI._multiInstSetting == multiInstOnSession && !session2Load._isSnapshot) // a session snapshot is never overwritten
 					nppParam.setLoadedSessionFilePath(sessionFileName);
 			}
 		}

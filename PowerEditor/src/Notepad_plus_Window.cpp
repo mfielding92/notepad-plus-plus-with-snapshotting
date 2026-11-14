@@ -437,9 +437,10 @@ void Notepad_plus_Window::init(HINSTANCE hInst, HWND parent, const wchar_t *cmdL
 	if (isSnapshotMode)
 	{
 		_notepad_plus_plus_core.checkModifiedDocument(false);
-		// Launch backup task
-		_notepad_plus_plus_core.launchDocumentBackupTask();
 	}
+
+	// Launch backup task: it runs for the whole process and does the backup only while the snapshot mode is enabled
+	_notepad_plus_plus_core.launchDocumentBackupTask();
 
 	// Make this call later to take effect
 	::SendMessage(_hSelf, NPPM_INTERNAL_SETWORDCHARS, 0, 0);

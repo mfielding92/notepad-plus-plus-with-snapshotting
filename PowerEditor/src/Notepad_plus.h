@@ -237,7 +237,9 @@ public:
 	void saveCurrentSession();
 	void saveFindHistory();
 
-	void getCurrentOpenedFiles(Session& session, bool includeUntitledDoc = false);
+	void getCurrentOpenedFiles(Session& session, bool includeUntitledDoc = false, bool includeSnapshotContent = false);
+	void saveSessionSnapshot();
+	bool restoreSessionSnapshotContent(Session& session);
 
 	bool fileLoadSession(const wchar_t* fn = nullptr);
 	const wchar_t* fileSaveSession(size_t nbFile, wchar_t** fileNames, const wchar_t* sessionFile2save, bool includeFileBrowser = false);
@@ -282,6 +284,7 @@ public:
 	}
 
 	void launchDocumentBackupTask();
+	void notifyBackupFailure();
 	int getQuoteIndexFrom(const wchar_t* quoter) const;
 	void showQuoteFromIndex(int index) const;
 	void showQuote(const QuoteParams* quote) const;
@@ -430,6 +433,8 @@ private:
 	bool _isSyncingZoom = false;
 
 	bool _isNppSessionSavedAtExit = false; // guard flag, it prevents emptying of the Notepad++ session.xml in case of multiple WM_ENDSESSION or WM_CLOSE messages
+	bool _isBackupTaskLaunched = false; // only one backup thread for the whole process
+	SessionSnapshot::Scheduler _sessionSnapshotScheduler;
 
 	ScintillaCtrls _scintillaCtrls4Plugins;
 

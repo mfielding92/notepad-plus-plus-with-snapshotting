@@ -936,9 +936,6 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 							scnN.nmhdr.idFrom = reinterpret_cast<uptr_t>(pluginMessage.c_str());
 							_pluginsManager.notify(&scnN);
 						}
-
-						NppGUI& nppGui = nppParam.getNppGUI();
-						nppGui._isCmdlineNosessionActivated = cmdLineParam->_isNoSession;
 					}
 					break;
 				}
@@ -1008,6 +1005,10 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 			if (nppParam.getNppGUI().isSnapshotMode())
 			{
 				MainFileManager.backupCurrentBuffer();
+				notifyBackupFailure();
+
+				if (_sessionSnapshotScheduler.shouldWrite())
+					saveSessionSnapshot();
 			}
 
 			return TRUE;
@@ -2958,6 +2959,11 @@ LRESULT Notepad_plus::process(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPa
 				{
 					::LockWindowUpdate(hwnd);
 					MainFileManager.backupCurrentBuffer();
+					notifyBackupFailure();
+
+					// the last edits since the previous snapshot
+					if (_sessionSnapshotScheduler.shouldWrite())
+						saveSessionSnapshot();
 				}
 
 				Session currentSession;

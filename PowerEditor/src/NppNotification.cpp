@@ -71,6 +71,7 @@ BOOL Notepad_plus::notify(SCNotification *notification)
 
 				// for the backup system
 				buffer->setModifiedStatus(true);
+				_sessionSnapshotScheduler.markDirty();
 
 				// check if possible IncrementalSearch does not need reset
 				if (_incrementFindDlg.isCreated() && _incrementFindDlg.isVisible())

@@ -52,6 +52,21 @@ namespace NppXml
 		return doc->save_file(filename.c_str(), "    ", pugi::format_indent | pugi::format_save_file_text);
 	}
 
+	// Same output as saveFile, but in memory and with LF eol (saveFile writes CRLF through the text mode)
+	[[nodiscard]] inline std::string saveToString(const Document doc) {
+		struct string_writer : pugi::xml_writer
+		{
+			std::string _out;
+			void write(const void* data, size_t size) override {
+				_out.append(static_cast<const char*>(data), size);
+			}
+		};
+
+		string_writer writer;
+		doc->save(writer, "    ", pugi::format_indent);
+		return writer._out;
+	}
+
 	[[nodiscard]] inline bool loadFileNativeLang(Document doc, const wchar_t* filename) {
 		return doc->load_file(filename, pugi::parse_cdata | pugi::parse_escapes | pugi::parse_eol | pugi::parse_comments | pugi::parse_declaration);
 	}

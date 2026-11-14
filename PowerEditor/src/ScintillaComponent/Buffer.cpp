@@ -1323,7 +1323,11 @@ bool FileManager::backupCurrentBuffer()
 				// if "backup" folder doesn't exist, create it.
 				if (!doesDirectoryExist(backupFilePath.c_str()))
 				{
-					::CreateDirectory(backupFilePath.c_str(), NULL);
+					if (!::CreateDirectory(backupFilePath.c_str(), NULL) && !doesDirectoryExist(backupFilePath.c_str()))
+					{
+						onBackupFailure(backupFilePath, ::GetLastError());
+						return false;
+					}
 				}
 
 				backupFilePath += buffer->getFileName();
@@ -1386,29 +1390,48 @@ bool FileManager::backupCurrentBuffer()
 						const char *newData = wmc.encode(SC_CP_UTF8, encoding, buf+i, static_cast<int>(grabSize), &newDataLen, &incompleteMultibyteChar);
 						grabSize -= incompleteMultibyteChar;
 						isWrittenSuccessful = UnicodeConvertor.writeFile(newData, newDataLen);
+						if (!isWrittenSuccessful)
+							break;
 					}
 
 					if (lengthDoc == 0)
 						isWrittenSuccessful = true;
 				}
+				DWORD lastError = UnicodeConvertor.getLastFileErrorState();
 				UnicodeConvertor.closeFile();
+
+				if (isWrittenSuccessful && buffer->isUntitled()) // "new #" file is saved successfully, then we replace its only physical existence by its temp
+				{
+					if (doesFileExist(fullpath))
+						isWrittenSuccessful = ::ReplaceFile(fullpath, fullpathTemp.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS, 0, 0) != FALSE;
+					else
+						isWrittenSuccessful = ::MoveFileEx(fullpathTemp.c_str(), fullpath, MOVEFILE_REPLACE_EXISTING) != FALSE;
+
+					if (!isWrittenSuccessful)
+						lastError = ::GetLastError();
+				}
 
 				if (isWrittenSuccessful) // backup file has been saved
 				{
-					if (buffer->isUntitled()) // "new #" file is saved successfully, then we replace its only physical existence by its temp
-					{
-						if (doesFileExist(fullpath))
-							::ReplaceFile(fullpath, fullpathTemp.c_str(), nullptr, REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS, 0, 0);
-						else
-							::MoveFileEx(fullpathTemp.c_str(), fullpath, MOVEFILE_REPLACE_EXISTING);
-					}
-
 					buffer->setTabCreatedTimeStringFromBakFile();
 
 					buffer->setModifiedStatus(false);
 
+					_backupFailureLatch.onWriteResult(SessionSnapshot::WriteOutcome::Ok);
+
 					result = true;	//all done
 				}
+				else // keep the modified status, so it will be retried at the next backup
+				{
+					if (buffer->isUntitled())
+						::DeleteFile(fullpathTemp.c_str());
+
+					onBackupFailure(fullpath, lastError);
+				}
+			}
+			else
+			{
+				onBackupFailure(buffer->isUntitled() ? fullpathTemp : fullpath, UnicodeConvertor.getLastFileErrorState());
 			}
 		}
 		else // buffer dirty but unmodified
@@ -1437,6 +1460,23 @@ bool FileManager::backupCurrentBuffer()
 		_pNotepadPlus->saveCurrentSession();
 	}
 	return result;
+}
+
+void FileManager::onBackupFailure(const std::wstring& failedPath, DWORD lastError)
+{
+	_backupFailedPath = failedPath;
+	_backupFailedError = lastError;
+	_backupFailureLatch.onWriteResult(SessionSnapshot::WriteOutcome::Failed);
+}
+
+bool FileManager::consumeBackupFailureNotice(std::wstring& failedPath, DWORD& lastError)
+{
+	if (!_backupFailureLatch.consumeFailureNotice())
+		return false;
+
+	failedPath = _backupFailedPath;
+	lastError = _backupFailedError;
+	return true;
 }
 
 bool FileManager::deleteBufferBackup(BufferID id)
@@ -1509,6 +1549,24 @@ static std::string encodeForUacSave(const char* buf, size_t len, UniMode mode, i
 			break;
 	}
 	return out;
+}
+
+// The bytes the backup file of this buffer contains (see backupCurrentBuffer), read without touching any view
+std::string FileManager::getBackupContent(BufferID id)
+{
+	Buffer* buffer = getBufferByID(id);
+
+	UniMode mode = buffer->getUnicodeMode();
+	if (mode == uniUTF8_NoBOM)
+		mode = uni8Bit;
+
+	_pscratchTilla->execute(SCI_SETDOCPOINTER, 0, buffer->_doc);
+	size_t lengthDoc = _pscratchTilla->getCurrentDocLen();
+	const char* buf = reinterpret_cast<const char*>(_pscratchTilla->execute(SCI_GETCHARACTERPOINTER));
+	std::string content = encodeForUacSave(buf, lengthDoc, mode, buffer->getEncoding());
+	_pscratchTilla->execute(SCI_SETDOCPOINTER, 0, _scratchDocDefault);
+
+	return content;
 }
 
 static std::wstring CreateGuidString()

@@ -48,6 +48,7 @@
 #include "NppConstants.h"
 #include "NppDarkMode.h"
 #include "NppXml.h"
+#include "SessionSnapshot.h"
 #include "ToolBar.h"
 #include "colors.h"
 #include "shortcut.h"
@@ -146,6 +147,11 @@ struct sessionFileInfo : public Position
 	FILETIME _originalFileLastModifTimestamp {};
 
 	MapPosition _mapPos;
+
+	// session snapshot only: the bytes of the per-file backup of this document
+	std::string _snapshotContent;
+	bool _hasSnapshotContent = false;
+	bool _isSnapshotContentOmitted = false; // dirty large file
 };
 
 struct FileBrowserRootsInfo
@@ -168,6 +174,7 @@ struct Session
 	std::vector<sessionFileInfo> _mainViewFiles;
 	std::vector<sessionFileInfo> _subViewFiles;
 	std::vector<FileBrowserRootsInfo> _fileBrowserRoots;
+	bool _isSnapshot = false; // loaded from a session snapshot file
 };
 
 
@@ -870,6 +877,7 @@ struct NppGUI final
 	bool isSnapshotMode() const { return _isSnapshotMode && _rememberLastSession && !_isCmdlineNosessionActivated; }
 	bool _isSnapshotMode = true;
 	size_t _snapshotBackupTiming = 7000;
+	unsigned _sessionSnapshotRetentionHours = SessionSnapshot::DEFAULT_RETENTION_HOURS; // 0: keep forever
 	std::wstring _cloudPath; // this option will never be read/written from/to config.xml
 	unsigned char _availableClouds = '\0'; // this option will never be read/written from/to config.xml
 
@@ -1563,6 +1571,7 @@ public:
 	void writeNeed2SaveUDL();
 	void writeShortcuts();
 	void writeSession(const Session& session, const wchar_t* fileName = nullptr);
+	std::string sessionToXml(const Session& session, const SYSTEMTIME* snapshotTime = nullptr);
 	bool writeFindHistory();
 
 	bool isExistingUserLangName(const wchar_t* newName) const {
