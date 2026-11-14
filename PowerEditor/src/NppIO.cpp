@@ -2850,23 +2850,24 @@ bool Notepad_plus::fileLoadSession(const wchar_t *fn)
 			Buffer * buf2 = MainFileManager.getBufferByID(_subDocTab.getBufferByIndex(0));
 			isEmptyNpp = (!buf1->isDirty() && buf1->isUntitled() && !buf2->isDirty() && buf2->isUntitled());
 		}
-		Session session2Load;
-		if (nppParam.loadSession(session2Load, sessionFileName.c_str()))
+		// a session snapshot is always restored into this instance
+		if (!isEmptyNpp && (nppGUI._multiInstSetting == multiInstOnSession || nppGUI._multiInstSetting == multiInst) && !nppParam.isSessionSnapshotFile(sessionFileName.c_str()))
 		{
-			// a session snapshot is always restored into this instance
-			if (!isEmptyNpp && (nppGUI._multiInstSetting == multiInstOnSession || nppGUI._multiInstSetting == multiInst) && !session2Load._isSnapshot)
-			{
-				wchar_t nppFullPath[MAX_PATH]{};
-				::GetModuleFileName(NULL, nppFullPath, MAX_PATH);
+			wchar_t nppFullPath[MAX_PATH]{};
+			::GetModuleFileName(NULL, nppFullPath, MAX_PATH);
 
-				wstring args = L"-multiInst -nosession -openSession ";
-				args += L"\"";
-				args += sessionFileName;
-				args += L"\"";
-				if (::ShellExecute(_pPublicInterface->getHSelf(), L"open", nppFullPath, args.c_str(), L".", SW_SHOW) > (HINSTANCE)32)
-					result = true;
-			}
-			else
+			wstring args = L"-multiInst -nosession -openSession ";
+			args += L"\"";
+			args += sessionFileName;
+			args += L"\"";
+			if (::ShellExecute(_pPublicInterface->getHSelf(), L"open", nppFullPath, args.c_str(), L".", SW_SHOW) > (HINSTANCE)32)
+				result = true;
+		}
+		else
+		{
+			Session session2Load;
+
+			if (nppParam.loadSession(session2Load, sessionFileName.c_str()))
 			{
 				wstring restoreReport;
 				const bool isSnapshotMode = prepareSessionSnapshotRestore(session2Load, restoreReport);

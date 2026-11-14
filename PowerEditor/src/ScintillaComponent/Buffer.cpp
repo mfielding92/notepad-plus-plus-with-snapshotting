@@ -1422,18 +1422,14 @@ bool FileManager::backupCurrentBuffer()
 			if (!backupFilePath.empty())
 			{
 				// delete backup file
-				const bool isDeleted = ::DeleteFile(backupFilePath.c_str()) != FALSE;
-				const DWORD deleteError = isDeleted ? ERROR_SUCCESS : ::GetLastError();
-				if (isDeleted || deleteError == ERROR_FILE_NOT_FOUND || deleteError == ERROR_PATH_NOT_FOUND)
-				{
-					buffer->setBackupFileName(wstring());
+				wstring file2Delete = buffer->getBackupFileName();
+				buffer->setBackupFileName(wstring());
+				result = (::DeleteFile(file2Delete.c_str()) != 0);
 
-					// Session changes, save it
-					hasModifForSession = true;
-				}
-				// else the backup file name is kept: the deletion is retried at the next backup
+				// Session changes, save it
+				hasModifForSession = true;
 			}
-			result = true;
+			result = true; // no backup file to delete
 		}
 	}
 

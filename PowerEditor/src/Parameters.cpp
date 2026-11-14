@@ -3196,6 +3196,21 @@ void NppParameters::setWorkingDir(const wchar_t * newPath)
 	}
 }
 
+// Only looks at the Session element: no network path prompt, and the file is never rewritten
+bool NppParameters::isSessionSnapshotFile(const wchar_t* sessionFileName) const
+{
+	NppXml::Document pXmlSessionDocument = new NppXml::NewDocument();
+	bool isSnapshot = false;
+	if (NppXml::loadFile(pXmlSessionDocument, sessionFileName))
+	{
+		NppXml::Element root = NppXml::firstChildElement(pXmlSessionDocument, "NotepadPlus");
+		NppXml::Element sessionRoot = root ? NppXml::firstChildElement(root, "Session") : NppXml::Element();
+		isSnapshot = sessionRoot && NppXml::attribute(sessionRoot, "snapshotVersion") != nullptr;
+	}
+	delete pXmlSessionDocument;
+	return isSnapshot;
+}
+
 bool NppParameters::loadSession(Session& session, const wchar_t* sessionFileName, const bool bSuppressErrorMsg)
 {
 	NppXml::Document pXmlSessionDocument = new NppXml::NewDocument();

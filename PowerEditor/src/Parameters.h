@@ -1685,6 +1685,7 @@ public:
 	bool doPrintAndExit() const { return _doPrintAndExit; }
 
 	bool loadSession(Session& session, const wchar_t* sessionFileName, const bool bSuppressErrorMsg = false);
+	bool isSessionSnapshotFile(const wchar_t* sessionFileName) const;
 	std::vector<std::wstring> takeSessionSaveFailureNotices();
 
 	void setLoadedSessionFilePath(const std::wstring & loadedSessionFilePath) {
